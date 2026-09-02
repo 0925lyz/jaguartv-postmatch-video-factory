@@ -2,11 +2,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def executable_path(name: str) -> str | None:
+    discovered = shutil.which(name)
+    if discovered:
+        return discovered
+    local = Path.home() / ".local" / "bin" / name
+    return str(local) if local.is_file() else None
+
+
+def tool_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    local_bin = str(Path.home() / ".local" / "bin")
+    environment["PATH"] = f"{local_bin}:{environment.get('PATH', '')}"
+    return environment
 
 
 MONTHS_PT_BR = {

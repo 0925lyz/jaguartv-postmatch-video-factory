@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
+import subprocess
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,7 +22,7 @@ from .research import build_phase2
 from .store import WorkflowStore
 from .task1 import load_task1_fixtures
 from .credentials import env_or_keychain
-from .util import utc_now
+from .util import executable_path, tool_environment, utc_now
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +82,59 @@ def _credential_available(name: str) -> bool:
         return False
 
 
+def _research_connectivity() -> dict[str, dict[str, Any]]:
+    checks: dict[str, dict[str, Any]] = {}
+    mcporter = executable_path("mcporter")
+    if not mcporter:
+        checks["agent_reach_exa"] = {"available": False, "error": "mcporter not found"}
+    else:
+        try:
+            completed = subprocess.run(
+                [mcporter, "call", "exa.web_search_exa", "query=football match result", "numResults=1"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                env=tool_environment(),
+            )
+            checks["agent_reach_exa"] = {
+                "available": bool(re.search(r"^URL:\s*https?://", completed.stdout, re.MULTILINE)),
+                "backend": "Exa via mcporter",
+            }
+        except (OSError, subprocess.SubprocessError) as error:
+            checks["agent_reach_exa"] = {
+                "available": False,
+                "backend": "Exa via mcporter",
+                "error": f"{type(error).__name__}: connectivity probe failed",
+            }
+
+    opencli = executable_path("opencli")
+    if not opencli:
+        checks["agent_reach_x"] = {"available": False, "error": "opencli not found"}
+    else:
+        try:
+            completed = subprocess.run(
+                [opencli, "twitter", "search", "football match result", "-f", "json"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                env=tool_environment(),
+            )
+            payload = json.loads(completed.stdout)
+            checks["agent_reach_x"] = {
+                "available": isinstance(payload, list),
+                "backend": "Twitter/X via OpenCLI",
+            }
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+            checks["agent_reach_x"] = {
+                "available": False,
+                "backend": "Twitter/X via OpenCLI",
+                "error": f"{type(error).__name__}: connectivity probe failed",
+            }
+    return checks
+
+
 def preflight(config: dict[str, Any]) -> dict[str, Any]:
     required_paths = {
         "collector_root": _path(config, "collector_root"),
@@ -93,7 +148,8 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
     checks: dict[str, Any] = {
         name: {"available": path.exists(), "path": str(path)} for name, path in required_paths.items()
     }
-    checks["agent_reach"] = {"available": shutil.which("agent-reach") is not None}
+    checks["agent_reach"] = {"available": executable_path("agent-reach") is not None}
+    checks.update(_research_connectivity())
     checks["dreamina"] = {"available": shutil.which("dreamina") is not None}
     checks["ffmpeg"] = {"available": shutil.which("ffmpeg") is not None}
     checks["ffprobe"] = {"available": shutil.which("ffprobe") is not None}

@@ -11,6 +11,7 @@ from jaguartv_postmatch.media_library import (
     discover_postmatch_posters,
 )
 from jaguartv_postmatch.pipeline import load_config
+from jaguartv_postmatch.util import executable_path
 
 
 def test_finished_video_discovery_excludes_hooks(
@@ -64,3 +65,15 @@ def test_config_rejects_wrong_server_label(tmp_path: Path) -> None:
     path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(ValueError, match="赛后比分"):
         load_config(path)
+
+
+def test_executable_path_falls_back_to_local_bin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    tool = local_bin / "mcporter"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr("jaguartv_postmatch.util.shutil.which", lambda _name: None)
+    monkeypatch.setattr("jaguartv_postmatch.util.Path.home", lambda: tmp_path)
+    assert executable_path("mcporter") == str(tool)

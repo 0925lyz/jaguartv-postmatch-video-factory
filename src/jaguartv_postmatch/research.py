@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .collector import _league_slug
-from .util import canonical_team, normalize_name, utc_now
+from .util import canonical_team, executable_path, normalize_name, tool_environment, utc_now
 
 
 def _curl_json(url: str) -> dict[str, Any]:
@@ -79,9 +79,12 @@ def parse_exa_output(raw: str, retrieved_at: str) -> list[dict[str, Any]]:
 
 
 def _agent_reach_web(query: str, retrieved_at: str) -> list[dict[str, Any]]:
+    mcporter = executable_path("mcporter")
+    if not mcporter:
+        raise RuntimeError("agent-reach Exa backend is unavailable: mcporter not found")
     completed = subprocess.run(
         [
-            "mcporter",
+            mcporter,
             "call",
             "exa.web_search_exa",
             f"query={query}",
@@ -91,6 +94,7 @@ def _agent_reach_web(query: str, retrieved_at: str) -> list[dict[str, Any]]:
         capture_output=True,
         text=True,
         timeout=60,
+        env=tool_environment(),
     )
     return parse_exa_output(completed.stdout, retrieved_at)
 
@@ -137,12 +141,16 @@ def is_match_specific_social_record(
 def _agent_reach_x(
     query: str, retrieved_at: str, result: dict[str, Any]
 ) -> list[dict[str, Any]]:
+    opencli = executable_path("opencli")
+    if not opencli:
+        raise RuntimeError("agent-reach Twitter/X backend is unavailable: opencli not found")
     completed = subprocess.run(
-        ["opencli", "twitter", "search", query, "-f", "json"],
+        [opencli, "twitter", "search", query, "-f", "json"],
         check=True,
         capture_output=True,
         text=True,
         timeout=60,
+        env=tool_environment(),
     )
     values = json.loads(completed.stdout)
     if not isinstance(values, list):
