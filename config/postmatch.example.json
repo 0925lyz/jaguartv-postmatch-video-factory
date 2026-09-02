@@ -1,0 +1,71 @@
+{
+  "schema_version": "jaguartv-postmatch-config-v1",
+  "timezone": "America/Sao_Paulo",
+  "public_timezone_label": "Horário de Brasília",
+  "schedule": "01:30",
+  "source_url": "https://copa.jarg.top/jogos-de-hoje",
+  "collector_root": "${JAGUARTV_COLLECTOR_ROOT}",
+  "system_prompts_and_models": "${JAGUARTV_SYSTEM_PROMPTS_ROOT}",
+  "jaguartv_v7_pack": "${JAGUARTV_V7_ROOT}",
+  "image2_database": "${JAGUARTV_IMAGE2_DATABASE}",
+  "figure_1": "assets/figure-1-jaguartv.png",
+  "channel_icons": "${JAGUARTV_IMAGE2_DATABASE}/assets/channels",
+  "pending_review_uploader": "${JAGUARTV_UPLOAD_ADAPTER}",
+  "runtime_root": "runtime",
+  "retry_policy_minutes": [0, 45, 120],
+  "final_states": ["FT", "AET", "PEN"],
+  "result_sources": {
+    "official_site": "https://copa.jarg.top/jogos-de-hoje",
+    "api_football_key_env": "API_FOOTBALL_KEY",
+    "api_football_optional": true
+  },
+  "image2": {
+    "primary_provider": "active-large-model-api",
+    "primary_model": "gpt-image-2",
+    "secondary_provider": "apimart",
+    "max_attempts_per_poster": 3
+  },
+  "reasoning": {
+    "primary_model": "deepseek-v4-flash",
+    "fallback_model": "deepseek-v4-pro",
+    "reasoning_effort": "high"
+  },
+  "visual_policy": {
+    "prefer_verified_real_players": true,
+    "virtual_player_only_when_no_verified_participant": true,
+    "score_panel_top_px": 760,
+    "face_safe_zone_bottom_px": 720
+  },
+  "video": {
+    "provider": "dreamina-vip",
+    "model": "seedance2.0fast_vip",
+    "resolution": "720p",
+    "hook_seconds": 4,
+    "max_generation_attempts": 2,
+    "final_seconds": 12,
+    "first_frame_and_cover": "complete-uncropped-poster-master",
+    "filename_language": "zh-CN",
+    "filename_source": "validated-poster-filename"
+  },
+  "voiceover": {
+    "provider": "apimart",
+    "model": "gpt-4o-mini-tts",
+    "inventory": [
+      {"id": "nova-01", "voice": "nova", "text": "Bora pro jogo! Sete dias grátis no Jaguar TV."},
+      {"id": "nova-02", "voice": "nova", "text": "Baixe agora! Jaguar Tê Vê, sete dias grátis!"},
+      {"id": "shimmer-01", "voice": "shimmer", "text": "Bora pro jogo! Sete dias grátis no Jaguar TV."},
+      {"id": "shimmer-02", "voice": "shimmer", "text": "Baixe agora! Jaguar Tê Vê, sete dias grátis!"}
+    ],
+    "speed": 1.3,
+    "fallback_to_local": true
+  },
+  "server": {
+    "category": "post_match_score",
+    "label": "赛后比分",
+    "status": "PENDING_REVIEW",
+    "credential_store": "macos-keychain",
+    "ssh_alias": "jarg-tencent",
+    "remote_app_dir": "/opt/jaguartv-content-factory-vnext",
+    "remote_dashboard_port": 8788
+  }
+}
