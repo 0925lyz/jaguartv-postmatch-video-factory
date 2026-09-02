@@ -56,11 +56,8 @@ def load_config(path: Path) -> dict[str, Any]:
         raw = Path(str(payload[key])).expanduser()
         payload[key] = str(raw if raw.is_absolute() else (FACTORY_ROOT / raw).resolve())
     reasoning = payload.get("reasoning") or {}
-    allowed_models = {"deepseek-v4-flash", "deepseek-v4-pro"}
-    if reasoning.get("primary_model") != "deepseek-v4-flash":
-        raise ValueError("primary text model must be deepseek-v4-flash")
-    if reasoning.get("fallback_model") not in allowed_models:
-        raise ValueError("fallback text model must use the configured DeepSeek provider")
+    if not str(reasoning.get("primary_model") or "current-task").strip():
+        raise ValueError("primary text model must be current-task or a configured model name")
     server = payload.get("server") or {}
     if server.get("category") != "post_match_score" or server.get("label") != "赛后比分":
         raise ValueError("server target must be Pending Review label 赛后比分")
@@ -153,7 +150,10 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
     checks["dreamina"] = {"available": shutil.which("dreamina") is not None}
     checks["ffmpeg"] = {"available": shutil.which("ffmpeg") is not None}
     checks["ffprobe"] = {"available": shutil.which("ffprobe") is not None}
-    checks["codex"] = {"available": shutil.which("codex") is not None}
+    checks["codex"] = {
+        "available": shutil.which("codex") is not None,
+        "text_model": (config.get("reasoning") or {}).get("primary_model", "current-task"),
+    }
     checks["image2_primary"] = {
         "available": (Path.home() / ".codex" / "auth.json").is_file(),
         "model": "gpt-image-2",

@@ -13,8 +13,8 @@ from jaguartv_postmatch.research import (
     is_match_specific_social_record,
     parse_exa_output,
 )
-from jaguartv_postmatch.phase3 import match_visual_direction
-from jaguartv_postmatch.phase4 import video_filenames
+from jaguartv_postmatch.phase3 import FIXED_LOGO_POLICY, match_visual_direction
+from jaguartv_postmatch.phase4 import SINGLE_HOOK_ACTION_POLICY, VIDEO_ASSEMBLY_POLICY, video_filenames
 from jaguartv_postmatch.voice import cta_voice_filename
 from jaguartv_postmatch.phase5 import _artifact_revision
 from jaguartv_postmatch.store import WorkflowStore
@@ -225,6 +225,18 @@ Verified match-specific summary.
         self.assertEqual(names["hook"], "动态钩子-科林蒂安-0：1-桑托斯_260830_海报-3秒.mp4")
         self.assertEqual(names["final"], "成片-科林蒂安-0：1-桑托斯_260830_海报-12秒.mp4")
         self.assertEqual(names["cover"], "封面-科林蒂安-0：1-桑托斯_260830_海报-1080x1920.jpg")
+
+    def test_video_generation_scope_is_opening_hook_only(self) -> None:
+        self.assertIn("opening poster hook", VIDEO_ASSEMBLY_POLICY)
+        self.assertIn("later segment", VIDEO_ASSEMBLY_POLICY)
+        self.assertIn("existing authorized inventory", VIDEO_ASSEMBLY_POLICY)
+
+    def test_logo_and_hook_motion_policies_are_locked(self) -> None:
+        self.assertIn("exact Figure 1 JaguarTV logo", FIXED_LOGO_POLICY)
+        self.assertIn("never redesign", FIXED_LOGO_POLICY)
+        self.assertIn("poster background", SINGLE_HOOK_ACTION_POLICY)
+        self.assertIn("jump", SINGLE_HOOK_ACTION_POLICY)
+        self.assertIn("pound the turf", SINGLE_HOOK_ACTION_POLICY)
 
     def test_cta_voice_filename_uses_female_voice_and_variant(self) -> None:
         self.assertEqual(

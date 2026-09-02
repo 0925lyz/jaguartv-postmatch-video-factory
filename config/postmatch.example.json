@@ -26,8 +26,8 @@
     "max_attempts_per_poster": 3
   },
   "reasoning": {
-    "primary_model": "deepseek-v4-flash",
-    "fallback_model": "deepseek-v4-pro",
+    "primary_model": "current-task",
+    "fallback_model": "current-task",
     "reasoning_effort": "high"
   },
   "visual_policy": {
@@ -40,6 +40,8 @@
     "provider": "dreamina-vip",
     "model": "seedance2.0fast_vip",
     "resolution": "720p",
+    "generation_scope": "opening_poster_hook_only",
+    "assembly_scope": "middle_operation_cta_music_voice_from_existing_inventory",
     "hook_seconds": 4,
     "max_generation_attempts": 2,
     "final_seconds": 12,

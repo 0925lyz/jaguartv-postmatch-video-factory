@@ -26,6 +26,19 @@ def tool_environment() -> dict[str, str]:
     return environment
 
 
+CURRENT_TASK_MODEL_NAMES = {"", "auto", "current", "current-task", "active-runtime", "inherit"}
+
+
+def codex_model_args(model: str | None, provider: str | None = None) -> list[str]:
+    selected = (model or "").strip()
+    if selected.casefold() in CURRENT_TASK_MODEL_NAMES:
+        return []
+    args = []
+    if provider:
+        args.extend(["-c", f'model_provider="{provider}"'])
+    return [*args, "-m", selected]
+
+
 MONTHS_PT_BR = {
     "JAN": 1,
     "FEV": 2,
@@ -59,6 +72,10 @@ TEAM_ALIASES = {
     "chapecoense sc": "chapecoense",
     "gremio fbpa": "gremio",
     "malaga cf": "malaga",
+    # 09-01 international/lower-league name bridging (copa.jarg.top <-> ESPN displayName)
+    "wolfsberger ac": "wolfsberger",
+    "norwich": "norwich city",
+    "fbc melgar": "melgar",
 }
 
 

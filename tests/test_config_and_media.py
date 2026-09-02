@@ -11,7 +11,7 @@ from jaguartv_postmatch.media_library import (
     discover_postmatch_posters,
 )
 from jaguartv_postmatch.pipeline import load_config
-from jaguartv_postmatch.util import executable_path
+from jaguartv_postmatch.util import codex_model_args, executable_path
 
 
 def test_finished_video_discovery_excludes_hooks(
@@ -56,8 +56,8 @@ def test_config_rejects_wrong_server_label(tmp_path: Path) -> None:
         "pending_review_uploader": ".",
         "runtime_root": "runtime",
         "reasoning": {
-            "primary_model": "deepseek-v4-flash",
-            "fallback_model": "deepseek-v4-pro",
+            "primary_model": "current-task",
+            "fallback_model": "current-task",
         },
         "server": {"category": "post_match_score", "label": "赛前预测"},
     }
@@ -77,3 +77,15 @@ def test_executable_path_falls_back_to_local_bin(
     monkeypatch.setattr("jaguartv_postmatch.util.shutil.which", lambda _name: None)
     monkeypatch.setattr("jaguartv_postmatch.util.Path.home", lambda: tmp_path)
     assert executable_path("mcporter") == str(tool)
+
+
+def test_codex_model_args_inherits_current_task_by_default() -> None:
+    assert codex_model_args("current-task") == []
+    assert codex_model_args("hy4") == ["-m", "hy4"]
+    assert codex_model_args("gpt-5.1") == ["-m", "gpt-5.1"]
+    assert codex_model_args("deepseek-v4-flash", "deepseek") == [
+        "-c",
+        'model_provider="deepseek"',
+        "-m",
+        "deepseek-v4-flash",
+    ]

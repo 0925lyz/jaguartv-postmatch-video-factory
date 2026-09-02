@@ -2,8 +2,8 @@
 
 ## Scope
 
-The repository owns Task 2 post-match production. Task 1 remains the owner of fixture collection,
-selection, kickoff time, channel identity, and stable fixture IDs. Task 2 never expands that list.
+The repository owns Task 3 post-match production. Task 1 remains the owner of fixture collection,
+selection, kickoff time, channel identity, and stable fixture IDs. Task 3 never expands that list.
 
 ## Pipeline boundaries
 
@@ -13,7 +13,7 @@ selection, kickoff time, channel identity, and stable fixture IDs. Task 2 never 
 | 1 | Task 1 fixtures plus official results | Versioned result records | Status is FT, AET, or PEN |
 | 2 | One completed match | Evidence and participant records | Match-specific sources only |
 | 3 | Verified result and research | Image2 prompt, 4:5 poster, QA | Score, winner, player, logo, face safety |
-| 4 | Validated poster | 3-second hook, 12-second video, cover, manifests | Exact poster first frame; no crop |
+| 4 | Validated poster plus existing V7 inventory | Generated 3-4 second poster hook, 12-second stitched video, cover, manifests | Only hook is generated; later segments are inventory |
 | 5 | Validated package | Pending Review record | Exact label 赛后比分; idempotent upload |
 
 Result revisions and uploads are content-addressed. A corrected official score updates the current
@@ -23,12 +23,20 @@ revision and regenerates unpublished artifacts without creating a second logical
 
 - `tomorrow-fixtures-automation`: browser collector and Task 1 fixture database.
 - `image2数据库`: current player, crest, kit, channel, prompt, and style inventory.
-- `system-prompts-and-models-of-ai-tools`: configured DeepSeek prompt routing.
+- `system-prompts-and-models-of-ai-tools`: configured prompt routing for the current task model.
 - `jaguartv-v7-pack`: operation clips, CTA, music, voice inventory, and video compositor.
 - `jaguar视频二创`: authenticated Pending Review upload adapter and server package contract.
 
 All are configured by local absolute paths and remain external to this repository. This avoids
 duplicating credentials, browser profiles, large licensed assets, or another repository's history.
+
+## Video assembly rule
+
+The only generated video segment is the opening poster hook created from the validated poster
+master. Downloader/search/main-interface segments, CTA, music, and voiceover are never generated
+per match; they are selected from existing authorized inventory and stitched into the final video.
+During that hook, the poster background should animate and the players may show strong score-based
+emotion. The fixed upper-right Figure 1 logo, score, crests, and date must stay unchanged.
 
 ## Failure behavior
 

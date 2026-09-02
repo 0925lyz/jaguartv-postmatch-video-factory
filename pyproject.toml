@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jaguartv-postmatch-video-factory"
 version = "1.0.0"
-description = "Auditable JaguarTV Task 2 post-match poster and video production pipeline"
+description = "Auditable JaguarTV Task 3 post-match poster and video production pipeline"
 requires-python = ">=3.11"
 dependencies = ["Pillow>=10"]
 

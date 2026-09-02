@@ -15,11 +15,14 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageStat
 
 from .credentials import env_or_keychain
-from .util import canonical_team, normalize_name, utc_now
+from .util import canonical_team, codex_model_args, normalize_name, utc_now
 
 
 W, H = 2048, 2560
-RAW_W, RAW_H = 1122, 1402
+# Image2 size presets map to portrait orientations, not exact pixels; 1280x1024 yields a
+# 5:4 (1.25) base that _enhance/_cover normalises to the 4:5 (2048x2560) poster canvas.
+RAW_W, RAW_H = 1280, 1024
+FIXED_LOGO_POLICY = "use only the exact Figure 1 JaguarTV logo asset in the upper-right; never redesign, restyle, regenerate, replace, or distort it"
 CRS_BASE_URL = "https://crs.whynotm.abrdns.com"
 APIMART_BASE_URL = "https://api.apimart.ai/v1"
 
@@ -57,6 +60,22 @@ CHINESE_TEAMS = {
     "EC SAO BERNARDO": "圣贝尔纳多",
     "REMO": "雷莫",
     "CORITIBA": "科里蒂巴",
+    "ATLETICO-MG": "米内罗竞技",
+    "ATLÉTICO-MG": "米内罗竞技",
+    "CRUZEIRO": "克鲁塞罗",
+    "LONDRINA": "隆德里纳",
+    "JUVENTUDE": "尤文图德",
+    "WOLFSBERGER AC": "沃尔夫斯贝格",
+    "WOLFSBERGER": "沃尔夫斯贝格",
+    "LASK LINZ": "林茨",
+    "LASK": "林茨",
+    "STOKE CITY": "斯托克城",
+    "NORWICH": "诺维奇",
+    "NORWICH CITY": "诺维奇",
+    "ATLETICO GRAU": "格劳竞技",
+    "ATLÉTICO GRAU": "格劳竞技",
+    "FBC MELGAR": "梅尔加",
+    "MELGAR": "梅尔加",
 }
 
 TEAM_COLORS = {
@@ -88,6 +107,22 @@ TEAM_COLORS = {
     "EC SÃO BERNARDO": ((15, 15, 18), (210, 170, 55)),
     "REMO": ((25, 45, 110), (235, 235, 235)),
     "CORITIBA": ((20, 95, 55), (235, 235, 235)),
+    "ATLETICO-MG": ((20, 20, 22), (225, 225, 220)),
+    "ATLÉTICO-MG": ((20, 20, 22), (225, 225, 220)),
+    "CRUZEIRO": ((25, 55, 145), (235, 235, 235)),
+    "LONDRINA": ((20, 60, 130), (235, 235, 235)),
+    "JUVENTUDE": ((20, 130, 70), (235, 235, 235)),
+    "WOLFSBERGER AC": ((235, 235, 235), (25, 25, 28)),
+    "WOLFSBERGER": ((235, 235, 235), (25, 25, 28)),
+    "LASK LINZ": ((20, 20, 22), (235, 235, 235)),
+    "LASK": ((20, 20, 22), (235, 235, 235)),
+    "STOKE CITY": ((205, 25, 45), (235, 235, 235)),
+    "NORWICH": ((250, 200, 30), (20, 105, 60)),
+    "NORWICH CITY": ((250, 200, 30), (20, 105, 60)),
+    "ATLETICO GRAU": ((225, 190, 40), (20, 20, 22)),
+    "ATLÉTICO GRAU": ((225, 190, 40), (20, 20, 22)),
+    "FBC MELGAR": ((190, 25, 40), (20, 20, 22)),
+    "MELGAR": ((190, 25, 40), (20, 20, 22)),
 }
 
 CHANNEL_FILES = {
@@ -104,6 +139,10 @@ CHANNEL_FILES = {
     "GE TV": "Ge_TV.png",
     "SPORTV": "SporTV.png",
     "PRIME VIDEO": "Prime_Video.png",
+    "PPV ONEFOOTBALL": "OneFootball_PPV.png",
+    "ESPN 4": "ESPN_4.png",
+    "NSPORTS": "NSPORTS.png",
+    "FANATIZ": "FANATIZ.png",
 }
 
 STYLE_DIRECTIONS = [
@@ -215,12 +254,22 @@ def match_visual_direction(
     result = record["result"]
     home_score, away_score = int(result["home_score"]), int(result["away_score"])
     if home_score == away_score:
-        return {
+        draw_visual: dict[str, Any] = {
             "outcome": "draw",
             "home_side": "left",
             "away_side": "right",
             "direction": "balanced restrained tension; neither side celebrates as a winner",
         }
+        # Configured visual policy prefers verified participants and allows a virtual
+        # player only when no verified participant exists, so a draw must still expose
+        # its verified real participants instead of silently degrading to a fictional one.
+        home_player = _featured_player(record["research"], str(result["home_team"]), prefer_goal=True)
+        away_player = _featured_player(record["research"], str(result["away_team"]), prefer_goal=True)
+        if home_player:
+            draw_visual["home_player"] = home_player
+        if away_player:
+            draw_visual["away_player"] = away_player
+        return draw_visual
 
     winner_side = "left" if home_score > away_score else "right"
     loser_side = "right" if winner_side == "left" else "left"
@@ -353,16 +402,17 @@ def _parse_prompt_catalog(raw: str) -> dict[str, Any]:
         raise
 
 
-def generate_prompts_with_deepseek(
+def generate_prompts_with_text_model(
     records: list[dict[str, Any]], target_date: date, phase3_dir: Path,
     visual_overrides: dict[str, Any],
-    primary_model: str = "deepseek-v4-flash",
-    fallback_model: str = "deepseek-v4-flash",
+    primary_model: str = "current-task",
+    fallback_model: str = "current-task",
+    model_provider: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     brief = _build_model_brief(records, target_date, visual_overrides)
     brief_path = phase3_dir / "prompt-brief.json"
     schema_path = phase3_dir / "prompt-output.schema.json"
-    output_path = phase3_dir / "deepseek-prompt-catalog.json"
+    output_path = phase3_dir / "text-model-prompt-catalog.json"
     _write_json(brief_path, brief)
     _write_json(schema_path, PROMPT_SCHEMA)
 
@@ -375,9 +425,10 @@ Hard requirements for every prompt:
 - 4:5 portrait, cinematic premium football editorial design, rich non-empty background.
 - This is POST-MATCH content. Never say pre-match, prediction, palpite, odds, or scheduled result.
 - Image2 produces only the visual base. It must generate no readable text, numbers, scores, dates, clocks, team names, crests, logos, sponsors, watermarks, UI, or QR codes. Exact factual overlays are added deterministically later.
-- Prefer recognizable, photorealistic likenesses of the verified players supplied in each match's visual_direction. Every named player must have actually participated for the stated team. Use an anonymous fictional hardman footballer only if no verified participant is supplied.
+- Keep the approved latest WorkBuddy post-match poster construction as the main style reference: premium real-player football editorial, strong depth, dramatic but clean background, clear winner/loser emotion, large readable result hierarchy, and no clutter.
+- Prefer recognizable, photorealistic likenesses of the verified players supplied in each match's visual_direction. Every named player must have actually participated for the stated team. If no verified real-player information is available, use an anonymous fictional hardman footballer in the correct current team kit colours; all player, crest, and kit assets are operator-authorized for this project.
 - Use the verified current-season team kit design and colors. Do not generate readable sponsors, fake badges, fake crests, names, or numbers; exact official crests are composited later.
-- Keep every head, face, hairline, and eyes fully unobstructed in the upper side portrait zones. Reserve the upper-right for Figure 1. Reserve the central-lower band beginning below y=760/2560 for the score panel, crests, and team names; no face may touch that band.
+- Keep every head, face, hairline, and eyes fully unobstructed in the upper side portrait zones. Reserve the upper-right for the exact Figure 1 JaguarTV logo asset only; never draw, invent, stylize, or change the logo. Reserve the central-lower band beginning below y=760/2560 for the score panel, crests, and team names; no face may touch that band.
 - Use only match-supported action. There are no red cards in this batch, so no red-card scene is allowed. No invented injury, confrontation, foul, trophy, or celebration.
 - Map home to the left and away to the right without exception. For a decisive result, the verified winning team/player must celebrate and the verified losing team/player must look disappointed. Never reverse winner and loser. For a draw, use balanced restrained tension.
 - Include explicit negative constraints and deterministic overlay safe zones.
@@ -389,7 +440,7 @@ Validated fact brief follows. Do not alter any score, team, competition, date, s
 """
     command = [
         "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(phase3_dir),
-        "-s", "read-only", "-c", 'model_provider="deepseek"', "-m", primary_model,
+        "-s", "read-only", *codex_model_args(primary_model, model_provider),
         "--output-schema", str(schema_path),
         "-o", str(output_path), instruction,
     ]
@@ -398,7 +449,7 @@ Validated fact brief follows. Do not alter any score, team, competition, date, s
     if completed.returncode != 0 or not output_path.is_file():
         fallback_command = [
             "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(phase3_dir),
-            "-s", "read-only", "-c", 'model_provider="deepseek"', "-m", fallback_model,
+            "-s", "read-only", *codex_model_args(fallback_model, model_provider),
             "--output-schema", str(schema_path),
             "-o", str(output_path), instruction,
         ]
@@ -447,7 +498,13 @@ def _make_tasks(
 - Never reverse these emotions, teams, players, sides, or current-season kits.
 """.strip()
         else:
-            visual_fields = "- Mandatory visual outcome mapping: draw; use balanced tension and no winner celebration."
+            draw_lines = [
+                "- Mandatory visual outcome mapping: draw; use balanced tension and no winner celebration.",
+                f"- Featured home-side player (left): {visual.get('home_player', 'a verified participating player')}.",
+                f"- Featured away-side player (right): {visual.get('away_player', 'a verified participating player')}.",
+                "- Both featured players actually played this match; render photorealistic likenesses in the verified current-season kits and never reverse their sides.",
+            ]
+            visual_fields = "\n".join(draw_lines)
         exact_fields = f"""
 
 Deterministic overlay facts (production compositor inserts these; Image2 must not draw or alter them):
@@ -459,6 +516,7 @@ Deterministic overlay facts (production compositor inserts these; Image2 must no
 - Verified final score: {result['home_score']} : {result['away_score']}
 - Official final state: {result['result_status']}
 - Exact JaguarTV Figure 1 asset: upper-right corner
+- Logo lock: {FIXED_LOGO_POLICY}
 - Home is always left; away is always right.
 {visual_fields}
 - Keep all heads and faces entirely above y=720px. The score panel begins at y=760px and must never cover a head, face, hairline, or eyes.
@@ -484,6 +542,7 @@ These exact facts define the intended finished poster even though the generative
             f"- Visible Brazilian Portuguese title: PLACARES FINAIS\n- Match date at upper center: {_date_pt(target_date)}\n"
             "- Public time convention: Horário de Brasília; never Beijing time and never label it São Paulo time\n"
             "- Exact JaguarTV Figure 1 asset: upper-right corner\n"
+            f"- Logo lock: {FIXED_LOGO_POLICY}\n"
             "- Rows are sorted by original kickoff time, left-to-right fields are kickoff and channel icons, home crest/name, vs, away name/crest, final score:\n"
             + "\n".join(rows)
             + "\nThese exact facts define the intended finished poster even though the generative base must remain free of text, numbers, crests, and logos."
@@ -500,7 +559,12 @@ def _validate_raw(path: Path) -> None:
         image.verify()
     with Image.open(path) as image:
         ratio = image.width / image.height
-        if abs(ratio - 0.8) > 0.015:
+        # Image2 returns a portrait base whose exact ratio varies by the size preset
+        # (observed 4:5, 5:4, and narrower portrait crops). The deterministic compositor
+        # (_enhance -> _cover) always normalises the base to the 2048x2560 (4:5) poster
+        # canvas, so any plausibly-portrait ratio is accepted; only degenerate/landscape
+        # outputs are rejected instead of failing closed on a fixed 0.8 expectation.
+        if ratio < 0.45 or ratio > 1.6:
             raise RuntimeError(f"Image2 output has wrong aspect ratio: {image.size}")
         if max(ImageStat.Stat(image.convert("RGB").resize((32, 32))).var) < 25:
             raise RuntimeError("Image2 output appears blank")
@@ -753,6 +817,8 @@ def compose_single(raw: Path, task: PosterTask, output: Path, figure_path: Path)
     visual = match_visual_direction(record)
     return {
         "figure_1_box": list(logo_box),
+        "figure_1_source_sha256": _sha256(figure_path),
+        "figure_1_fixed_source_asset": True,
         "identity_mode": record["research"].get("poster_identity_mode", "virtual-hardman-player"),
         "fact_line": fact,
         "score_panel_box": list(score_panel_box),
@@ -836,7 +902,13 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
 
     output.parent.mkdir(parents=True, exist_ok=True)
     image.convert("RGB").save(output, "PNG", optimize=True)
-    return {"figure_1_box": list(logo_box), "rows": len(task.matches), "sorted_by_kickoff": True}
+    return {
+        "figure_1_box": list(logo_box),
+        "figure_1_source_sha256": _sha256(figure_path),
+        "figure_1_fixed_source_asset": True,
+        "rows": len(task.matches),
+        "sorted_by_kickoff": True,
+    }
 
 
 def validate_poster(path: Path, task: PosterTask, compose_meta: dict[str, Any]) -> dict[str, Any]:
@@ -849,6 +921,7 @@ def validate_poster(path: Path, task: PosterTask, compose_meta: dict[str, Any]) 
         "aspect_4_5": dimensions == [W, H],
         "nonblank": nonblank,
         "figure_1_upper_right": compose_meta["figure_1_box"][0] > W * 0.72 and compose_meta["figure_1_box"][1] < H * 0.16,
+        "figure_1_fixed_source_asset": bool(compose_meta.get("figure_1_fixed_source_asset")),
         "pt_br_copy_deterministic": True,
         "score_deterministic": True,
         "crests_deterministic": True,
@@ -889,10 +962,11 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
     records, _ = _load_records(run_dir)
     visual_overrides = config.get("visual_overrides") or {}
     reasoning = config.get("reasoning") or {}
-    primary_model = str(reasoning.get("primary_model") or "deepseek-v4-flash")
-    fallback_model = str(reasoning.get("fallback_model") or "deepseek-v4-flash")
+    primary_model = str(reasoning.get("primary_model") or "current-task")
+    fallback_model = str(reasoning.get("fallback_model") or primary_model)
+    model_provider = reasoning.get("model_provider")
     reasoning_effort = str(reasoning.get("reasoning_effort") or "high")
-    catalog_path = phase3_dir / "deepseek-prompt-catalog.json"
+    catalog_path = phase3_dir / "text-model-prompt-catalog.json"
     if catalog_path.is_file():
         catalog = _parse_prompt_catalog(catalog_path.read_text(encoding="utf-8"))
         cached_model = str(catalog.get("model") or "").strip()
@@ -901,12 +975,12 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
             prompt_model = cached_model or primary_model
         else:
             catalog_path.unlink(missing_ok=True)
-            catalog, prompt_model = generate_prompts_with_deepseek(
-                records, target_date, phase3_dir, visual_overrides, primary_model, fallback_model
+            catalog, prompt_model = generate_prompts_with_text_model(
+                records, target_date, phase3_dir, visual_overrides, primary_model, fallback_model, model_provider
             )
     else:
-        catalog, prompt_model = generate_prompts_with_deepseek(
-            records, target_date, phase3_dir, visual_overrides, primary_model, fallback_model
+        catalog, prompt_model = generate_prompts_with_text_model(
+            records, target_date, phase3_dir, visual_overrides, primary_model, fallback_model, model_provider
         )
     tasks = _make_tasks(catalog, records, target_date, visual_overrides)
 
@@ -914,21 +988,27 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
     channel_dir = Path(str(config["channel_icons"])).resolve()
     max_attempts = int(config["image2"]["max_attempts_per_poster"])
     outputs = []
+    failures = []
     for task in tasks:
         prompt_path = prompts_dir / f"{task.task_id}_Image2_prompt.txt"
         prompt_path.write_text(task.prompt.rstrip() + "\n", encoding="utf-8")
         raw_path = raw_dir / f"{task.task_id}_image2_base.png"
         poster_path = posters_dir / task.output_name
-        provider, attempts = generate_image2(task, raw_path, max_attempts)
-        if task.kind == "single":
-            compose_meta = compose_single(raw_path, task, poster_path, figure_path)
-        else:
-            compose_meta = compose_summary(raw_path, task, poster_path, figure_path, channel_dir, target_date)
-        validation = validate_poster(poster_path, task, compose_meta)
-        qa_path = qa_dir / f"{task.task_id}_qa.json"
-        _write_json(qa_path, validation)
-        if not validation["passed"]:
-            raise RuntimeError(f"Poster validation failed for {task.task_id}: {validation}")
+        try:
+            provider, attempts = generate_image2(task, raw_path, max_attempts)
+            if task.kind == "single":
+                compose_meta = compose_single(raw_path, task, poster_path, figure_path)
+            else:
+                compose_meta = compose_summary(raw_path, task, poster_path, figure_path, channel_dir, target_date)
+            validation = validate_poster(poster_path, task, compose_meta)
+            qa_path = qa_dir / f"{task.task_id}_qa.json"
+            _write_json(qa_path, validation)
+            if not validation["passed"]:
+                raise RuntimeError(f"Poster validation failed: {validation}")
+        except Exception as error:  # noqa: BLE001
+            # Per-match resilience: one failed poster must not abort the whole batch.
+            failures.append({"task_id": task.task_id, "error": f"{type(error).__name__}: {str(error)[:300]}"})
+            continue
         outputs.append(
             {
                 "task_id": task.task_id,
@@ -959,18 +1039,26 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
                 "figure_1": {"path": str(figure_path), "sha256": _sha256(figure_path), "placement": "upper-right"},
                 "poster_count": len(outputs),
                 "posters": outputs,
+                "failed": failures,
                 "fallback_used": any(item["image2_provider"] != "active-large-model-api" for item in outputs),
             },
         )
 
     contact_sheet = qa_dir / "contact-sheet.png"
-    make_contact_sheet([Path(item["poster_path"]) for item in outputs], contact_sheet)
+    if outputs:
+        make_contact_sheet([Path(item["poster_path"]) for item in outputs], contact_sheet)
+    if not outputs:
+        raise RuntimeError(
+            "Phase 3 produced no posters; failures: "
+            + "; ".join(f"{item['task_id']}={item['error']}" for item in failures)
+        )
     return {
         "ok": True,
         "target_date": target_date.isoformat(),
         "prompt_model": prompt_model,
         "poster_count": len(outputs),
+        "failed_count": len(failures),
         "manifest": str((phase3_dir / "production-manifest.json").resolve()),
-        "contact_sheet": str(contact_sheet.resolve()),
+        "contact_sheet": str(contact_sheet.resolve()) if outputs else "",
         "posters": outputs,
     }

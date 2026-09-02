@@ -1,6 +1,6 @@
-# JaguarTV 任务2赛后比分视频工厂
+# JaguarTV 任务3赛后比分视频工厂
 
-这是从 Original Content Factory 抽离的独立赛后生产仓库。它只消费任务1已选赛程，完成
+这是从 Original Content Factory 抽离的独立任务3赛后生产仓库。它只消费任务1已选赛程，完成
 赛果核验、赛后研究、Image2 海报、即梦/Seedance 短视频、素材轮循和服务器待审核上传。
 它不创建新的比赛筛选清单，也不修改 `Video-creation-automation`。
 
@@ -10,9 +10,13 @@
 2. 对照 `copa.jarg.top` 与已配置的赛果来源，仅接收 `FT`、`AET`、`PEN`。
 3. 使用 agent-reach 收集当前比赛的可追溯赛后证据和参赛球员信息。
 4. 通过 Image2 生成 4:5 巴葡赛后海报，Figure 1 固定右上，比分置于脸部安全区下方。
-5. 用即梦 VIP / Seedance 生成动态钩子，再由 V7 组装为 12 秒中文命名成片。
-6. 首帧和封面完整复现海报；操作片段、CTA、音乐和口播库存轮循。
-7. 幂等上传到 Pending Review 的 `赛后比分` 标签，不自动发布。
+5. 只用即梦 VIP / Seedance 生成前 3-4 秒海报动态钩子。
+6. 钩子只让海报背景和比分情绪动起来：赢家可激烈跳跃庆祝，输家可捶草坪、叹气、埋头或抱怨；右上 Figure 1 原图 logo、比分、队徽和日期不能变形或漂移。
+7. 后续操作片段、CTA、音乐和口播全部从已有授权库存轮循拼接，由 V7 组装为 12 秒中文命名成片。
+8. 首帧和封面完整复现海报。
+9. 幂等上传到 Pending Review 的 `赛后比分` 标签，不自动发布。
+
+海报风格优先保留最新 WorkBuddy 赛后批次已认可的构造：真人球星、强景深、干净戏剧背景、大比分层级、明确胜负情绪。找不到可验证真人信息时，使用匿名虚拟硬汉球员；项目内球员、队徽和球衣素材按操作员授权处理。
 
 海报背景生成方法与贴字注意事项见 [docs/poster-master-prompt.md](docs/poster-master-prompt.md) 与 [docs/poster-production-rules.md](docs/poster-production-rules.md)。
 
@@ -27,6 +31,8 @@ cp config/postmatch.example.json config/local.json
 
 `config/local.json` 只保存本机路径，不保存密钥。密钥通过环境变量或 macOS Keychain 提供。
 仓库不会追踪运行数据库、生成媒体、浏览器会话或上传凭据。
+文字提示词默认使用当前任务窗口正在执行的大模型；也可以在 `reasoning.primary_model`
+里指定 `hy3`、`hy4`、`deepseek` 或 `gpt` 系列等已配置模型。
 
 ## 使用
 

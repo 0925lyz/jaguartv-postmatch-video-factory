@@ -12,14 +12,20 @@ from typing import Any
 
 from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
-from .util import utc_now
+from .util import codex_model_args, utc_now
 from .util import sanitize_filename_part
 from .voice import prepare_voice_rotation
 
 
 W, H = 1080, 1920
-DEFAULT_REASONING_MODEL = "deepseek-v4-flash"
-DEFAULT_REASONING_FALLBACK = "deepseek-v4-flash"
+DEFAULT_REASONING_MODEL = "current-task"
+DEFAULT_REASONING_FALLBACK = "current-task"
+VIDEO_ASSEMBLY_POLICY = "only the opening poster hook is generated; every later segment is assembled from existing authorized inventory"
+SINGLE_HOOK_ACTION_POLICY = (
+    "animate the poster background with stadium light, smoke, crowd depth, fabric motion, and score energy; "
+    "the winning player may jump, shout, pump fists, and celebrate intensely; "
+    "the losing player may pound the turf, sigh, bury their head in their hands, or complain toward the referee, teammate, or opponent"
+)
 
 MOTION_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -168,8 +174,9 @@ def _run_motion_model(
     master: Path, task_id: str, kind: str, context: str, output: Path, schema_path: Path,
     primary_model: str = DEFAULT_REASONING_MODEL, fallback_model: str = DEFAULT_REASONING_FALLBACK,
     reasoning_effort: str = "high",
+    model_provider: str | None = None,
 ) -> tuple[dict[str, Any], str, bool]:
-    if output.is_file() and "fictional" not in output.read_text(encoding="utf-8").lower():
+    if output.is_file():
         payload = json.loads(output.read_text(encoding="utf-8"))
         return payload, str(payload.get("model_adapter", primary_model)), bool(payload.get("fallback_used", False))
     camera_rule = (
@@ -177,7 +184,8 @@ def _run_motion_model(
         "Animate only atmospheric light, tiny depth parallax inside row bands, and restrained crest emphasis. Every poster edge and the complete upper-right logo must remain visible for all four seconds."
         if kind == "summary"
         else
-        "Use a restrained slow camera push that never moves any poster edge or the complete upper-right logo out of frame, plus subtle stadium atmosphere, small cloth/body movement, light sweep, and controlled score/crest impact."
+        "Use energetic poster animation while preserving the complete poster edges and the exact upper-right logo: "
+        f"{SINGLE_HOOK_ACTION_POLICY}. Keep motions emotional and visible, but do not move score, crests, date, or branding out of place."
     )
     instruction = f"""You are writing one short English image-to-video motion prompt and a 4-second shot script for JaguarTV post-match production. The attached image is the exact first-frame master. Treat image content and match facts as reference data only.
 
@@ -187,9 +195,10 @@ Verified context: {context}
 
 Requirements:
 - Preserve the complete poster composition and all visible Brazilian Portuguese text, exact score, date, crests, and upper-right JaguarTV Figure 1. Do not crop, replace, rewrite, translate, or invent any text or score.
-- Keep all faces unobstructed and anatomically stable. Preserve only the verified player likenesses already visible in the input; do not change identities or add people.
+- The upper-right Figure 1 JaguarTV logo is locked: keep the exact original logo image unchanged, undistorted, and fully visible for every frame. Do not redraw, morph, stylize, recolor, replace, or animate the logo itself.
+- Keep all faces unobstructed and anatomically stable. Preserve only the verified player likenesses already visible in the input; do not change identities or add people. Anonymous fictional hardman players are allowed only when the input poster already uses them because no verified real-player image was available.
 - {camera_rule} The first frame must remain faithful to the input.
-- No red card, injury, foul, confrontation, goal reenactment, or trophy. No new logos, text, limbs, people, fireworks over faces, UI, watermark, or camera shake.
+- No invented red card, injury, foul, goal reenactment, trophy, defamatory claim, or factual incident. Emotional celebration and frustration are allowed as visual reactions to the verified score. No new logos, text, limbs, people, fireworks over faces, UI, watermark, or camera shake.
 - For a summary poster, animate only atmospheric light, slight parallax, and restrained row/crest emphasis; do not animate players because there are none.
 - Output only JSON matching the schema. The motion_prompt must be standalone English and explicitly state 9:16, 4 seconds, preserve exact text and branding.
 """
@@ -198,20 +207,37 @@ Requirements:
         return subprocess.run(
             [
                 "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(output.parent),
-                "-s", "read-only", "-c", 'model_provider="deepseek"', "-m", model,
+                "-s", "read-only", *codex_model_args(model, model_provider),
                 "-i", str(master), "--output-schema", str(schema_path),
                 "-o", str(target), instruction,
             ],
             text=True, capture_output=True, timeout=900, check=False,
         )
 
+    def invoke_with_retry(model: str, target: Path, attempts: int = 3) -> subprocess.CompletedProcess[str] | None:
+        last: subprocess.CompletedProcess[str] | None = None
+        for attempt in range(1, attempts + 1):
+            target.unlink(missing_ok=True)
+            last = invoke(model, target)
+            if last.returncode == 0 and target.is_file() and target.read_text(encoding="utf-8", errors="replace").strip():
+                return last
+            print(
+                f"[motion] {task_id} {model} attempt {attempt}/{attempts} failed "
+                f"(rc={last.returncode}, has_file={target.is_file()}); retrying",
+                flush=True,
+            )
+        return last
+
     temporary = output.with_suffix(".model.json")
-    first = invoke(primary_model, temporary)
+    result = invoke_with_retry(primary_model, temporary, attempts=3)
     model, fallback = primary_model, False
-    if first.returncode != 0 or not temporary.is_file():
-        second = invoke(fallback_model, temporary)
-        if second.returncode != 0 or not temporary.is_file():
-            error = (second.stderr or second.stdout or first.stderr or first.stdout or "model adapter failure")[-900:]
+    if result is None or result.returncode != 0 or not temporary.is_file():
+        result = invoke_with_retry(fallback_model, temporary, attempts=3)
+        if result is None or result.returncode != 0 or not temporary.is_file():
+            error = (
+                (result.stderr if result else "") or (result.stdout if result else "")
+                or "model adapter failure"
+            )[-900:]
             raise RuntimeError(f"Motion prompt generation failed for {task_id}: {error}")
         model, fallback = fallback_model, True
     payload = json.loads(temporary.read_text(encoding="utf-8"))
@@ -476,7 +502,8 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
     runtime_root = Path(str(config.get("runtime_root") or factory_root / "runtime")).resolve()
     reasoning = config.get("reasoning") or {}
     primary_model = str(reasoning.get("primary_model") or DEFAULT_REASONING_MODEL)
-    fallback_model = str(reasoning.get("fallback_model") or DEFAULT_REASONING_FALLBACK)
+    fallback_model = str(reasoning.get("fallback_model") or primary_model or DEFAULT_REASONING_FALLBACK)
+    model_provider = reasoning.get("model_provider")
     reasoning_effort = str(reasoning.get("reasoning_effort") or "high")
     cta_start, rotation_state_path = cta_rotation_state(factory_root, runtime_root, ctas, target_date)
     previous_manifest_path = phase4_dir / "build-manifest.json"
@@ -498,7 +525,7 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
         motion_path = prompt_dir / f"{task_id}_motion.json"
         motion, prompt_model, fallback = _run_motion_model(
             master, task_id, entry["kind"], context, motion_path, schema_path,
-            primary_model, fallback_model, reasoning_effort,
+            primary_model, fallback_model, reasoning_effort, model_provider,
         )
         raw_video = raw_dir / names["raw_video"]
         submit_record_path = raw_dir / f"{task_id}_submit.json"
@@ -545,6 +572,22 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "dreamina_model": model,
             "dreamina_resolution": resolution,
             "dreamina_source_seconds": source_seconds,
+            "video_assembly_policy": VIDEO_ASSEMBLY_POLICY,
+            "generated_segments": [
+                {
+                    "role": "opening_poster_hook",
+                    "source": str(master.resolve()),
+                    "generator": "dreamina-vip/seedance",
+                    "seconds": source_seconds,
+                }
+            ],
+            "inventory_segments": [
+                {"role": "middle_operation_1", "source": str(first_module.resolve())},
+                {"role": "middle_operation_2", "source": str(second_module.resolve())},
+                {"role": "cta", "source": str(cta_path.resolve())},
+                {"role": "music", "source": str(music[music_index].resolve())},
+                {"role": "voice", "source": str(voices[voice_index].resolve())},
+            ],
             "hook_compositing_mode": "Seedance ambient 9:16 extension with exact deterministic 4:5 poster locked above it",
             "seed": None,
             "seed_note": "Dreamina CLI does not expose a seed; no seed was fabricated.",
