@@ -14,6 +14,8 @@
 6. 首帧和封面完整复现海报；操作片段、CTA、音乐和口播库存轮循。
 7. 幂等上传到 Pending Review 的 `赛后比分` 标签，不自动发布。
 
+海报背景生成方法与贴字注意事项见 [docs/poster-master-prompt.md](docs/poster-master-prompt.md) 与 [docs/poster-production-rules.md](docs/poster-production-rules.md)。
+
 ## 安装
 
 ```bash
