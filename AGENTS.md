@@ -2,6 +2,14 @@
 
 These rules apply to every task and automation in this repository.
 
+## Canonical workspace
+
+- Development directory: `/Users/jaguar/WorkBuddy/赛前/jaguartv-postmatch-video-factory`
+- WorkBuddy execution directory: `/Users/jaguar/WorkBuddy/赛前/jaguartv-postmatch-video-factory`
+- GitHub repository: `0925lyz/jaguartv-postmatch-video-factory`
+- Treat `main` on the GitHub repository as continuously updated; pull or fetch before assuming the
+  local checkout is current.
+
 ## Text generation
 
 - Use the large model selected for the current execution task by default.

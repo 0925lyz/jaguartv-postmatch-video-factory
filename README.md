@@ -4,6 +4,9 @@
 赛果核验、赛后研究、Image2 海报、即梦/Seedance 短视频、素材轮循和服务器待审核上传。
 它不创建新的比赛筛选清单，也不修改 `Video-creation-automation`。
 
+Canonical local path: `/Users/jaguar/WorkBuddy/赛前/jaguartv-postmatch-video-factory`
+GitHub: `0925lyz/jaguartv-postmatch-video-factory`
+
 ## 流程
 
 1. 从任务1清单读取稳定比赛 ID、开赛时间和全部频道。
