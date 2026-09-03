@@ -362,8 +362,16 @@ def research_match(result: dict[str, Any]) -> dict[str, Any]:
         f"{result['home_team']} {result['away_team']} {result['home_score']}-{result['away_score']} "
         f"{portuguese_date}"
     )
-    web_sources = _agent_reach_web(score_query, retrieved_at)
-    x_sources = _agent_reach_x(x_query, retrieved_at, result)
+    try:
+        web_sources = _agent_reach_web(score_query, retrieved_at)
+    except Exception as exc:  # non-fatal: agent-reach Exa backend unavailable/timeout
+        web_sources = []
+        print(f"[warn] agent_reach_web unavailable, skipping web research: {exc}")
+    try:
+        x_sources = _agent_reach_x(x_query, retrieved_at, result)
+    except Exception as exc:  # non-fatal: agent-reach X backend unavailable/timeout
+        x_sources = []
+        print(f"[warn] agent_reach_x unavailable, skipping X research: {exc}")
     participants = _participants(summary)
     goals = _goal_events(summary)
     incidents = _incidents(summary)

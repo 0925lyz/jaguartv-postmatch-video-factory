@@ -12,7 +12,7 @@ from typing import Any
 
 from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
-from .util import codex_model_args, utc_now
+from .util import codex_model_args, normalize_name, utc_now
 from .util import sanitize_filename_part
 from .voice import prepare_voice_rotation
 
@@ -78,15 +78,19 @@ def _probe(path: Path) -> dict[str, Any]:
     }
 
 
-def video_filenames(poster_path: str | Path, source_seconds: int = 4) -> dict[str, str]:
+def video_filenames(poster_path: str | Path, source_seconds: int = 4, sequence: str | int | None = None) -> dict[str, str]:
     stem = sanitize_filename_part(Path(poster_path).stem)
+    prefix = f"{int(sequence):02d}" if sequence is not None else ""
+    named = f"{prefix}{stem}" if prefix else stem
     return {
-        "media_stem": stem,
-        "master": f"母版-{stem}-1080x1920.png",
-        "raw_video": f"即梦动态-{stem}-{source_seconds}秒.mp4",
-        "hook": f"动态钩子-{stem}-3秒.mp4",
-        "final": f"成片-{stem}-12秒.mp4",
-        "cover": f"封面-{stem}-1080x1920.jpg",
+        "media_stem": named,
+        "poster_stem": stem,
+        "sequence": prefix,
+        "master": f"{named}_母版_1080x1920.png",
+        "raw_video": f"{named}_即梦动态_{source_seconds}秒.mp4",
+        "hook": f"{named}_动态钩子_3秒.mp4",
+        "final": f"{named}_成片_12秒.mp4",
+        "cover": f"{named}_封面_1080x1920.jpg",
     }
 
 
@@ -391,19 +395,33 @@ def _caption_for_single(result: dict[str, Any], research: dict[str, Any]) -> dic
     parsed_date = date.fromisoformat(result["official_match_date"])
     months = ("janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro")
     date_text = f"{parsed_date.day} de {months[parsed_date.month - 1]} de {parsed_date.year}"
+    tags = _caption_tags(result["home_team"], result["away_team"], result["competition"])
     return {
         "match": match,
         "task1_fixture_id": result["task1_fixture_id"],
-        "caption_tk": f"PLACAR FINAL: {match}. {('Gols: ' + goal_text + '. ') if goal_text else ''}Qual foi o lance decisivo? Conte nos comentários.",
-        "tags_tk": ["#placarfinal", "#futebol", "#resultados", "#jaguartvbrasil"],
+        "caption_tk": (
+            f"PLACAR FINAL: {match}. "
+            f"{('Gols: ' + goal_text + '. ') if goal_text else ''}"
+            "Vem ver ao vivo no Jaguar TV 📺 7 dias grátis no jaguartvbrasil.com para Android e TV Box."
+        ),
+        "tags_tk": tags,
         "caption_yt": (
             f"Resultado oficial: {match}, por {result['competition']}, em {date_text}. "
             f"A partida começou às {result['original_kickoff_time']} no Horário de Brasília. "
             f"{('Gols: ' + goal_text + '. ') if goal_text else ''}"
-            "Reveja o placar e diga qual foi o momento que mudou o jogo."
+            "Baixa no jaguartvbrasil.com 📲 e assista TV ao vivo no Jaguar TV."
         ),
-        "tags_yt": ["placar final", "futebol", "resultados", "jaguar tv brasil"],
+        "tags_yt": [tag.removeprefix("#") for tag in tags],
     }
+
+
+def _caption_tags(home: str, away: str, competition: str) -> list[str]:
+    def tag(value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "", normalize_name(value))
+        return f"#{slug[:28] or 'futebol'}"
+
+    league = tag(competition.split("·", 1)[0])
+    return [tag(home), tag(away), league, "#placarfinal", "#jaguartvbrasil"]
 
 
 def _captions(entries: list[dict[str, Any]], research_by_id: dict[str, dict[str, Any]], target_date: date) -> dict[str, Any]:
@@ -414,7 +432,7 @@ def _captions(entries: list[dict[str, Any]], research_by_id: dict[str, dict[str,
         "generated_at": utc_now(),
         "items": {},
     }
-    for entry in entries:
+    for entry in sorted(entries, key=lambda item: str(item.get("sequence") or "")):
         if entry["kind"] == "single":
             result = entry["results"][0]
             payload["items"][entry["task_id"]] = _caption_for_single(result, research_by_id[result["task1_fixture_id"]])
@@ -425,10 +443,16 @@ def _captions(entries: list[dict[str, Any]], research_by_id: dict[str, dict[str,
             date_text = f"{target_date.day} de {months[target_date.month - 1]} de {target_date.year}"
             payload["items"][entry["task_id"]] = {
                 "summary": True,
-                "caption_tk": f"PLACARES FINAIS de {date_text}: {joined}. Qual resultado mais chamou sua atenção?",
-                "tags_tk": ["#placares", "#futebol", "#resultados", "#jaguartvbrasil"],
-                "caption_yt": f"Resumo dos resultados oficiais de {date_text}, no Horário de Brasília: {joined}.",
-                "tags_yt": ["placares", "futebol", "resultados", "jaguar tv brasil"],
+                "caption_tk": (
+                    f"PLACARES FINAIS de {date_text}: {joined}. "
+                    "Vem ver ao vivo no Jaguar TV 📺 7 dias grátis no jaguartvbrasil.com para Android e TV Box."
+                ),
+                "tags_tk": ["#placares", "#futebol", "#resultados", "#tvaovivo", "#jaguartvbrasil"],
+                "caption_yt": (
+                    f"Resumo dos resultados oficiais de {date_text}, no Horário de Brasília: {joined}. "
+                    "Baixa no jaguartvbrasil.com 📲 e assista TV ao vivo no Jaguar TV."
+                ),
+                "tags_yt": ["placares", "futebol", "resultados", "tvaovivo", "jaguartvbrasil"],
             }
     return payload
 
@@ -515,8 +539,9 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
     cta_assignment_count = 0
 
     for index, entry in enumerate(entries):
+        entry["sequence"] = f"{index + 1:02d}"
         task_id = entry["task_id"]
-        names = video_filenames(entry["poster_path"], source_seconds)
+        names = video_filenames(entry["poster_path"], source_seconds, entry["sequence"])
         media_stem = names["media_stem"]
         master = output_dir / names["master"]
         master_meta = _master_from_poster(Path(entry["poster_path"]), master)
@@ -557,6 +582,7 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
         cta_path = ctas[cta_index]
         component = {
             "task_id": task_id,
+            "sequence": entry["sequence"],
             "slug": media_stem,
             "media_stem": media_stem,
             "filename_policy": "Chinese poster-derived names for all generated media",
@@ -627,7 +653,7 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
     validations = []
     for item in manifest_items:
         task_id = item["task_id"]
-        names = video_filenames(item["poster"], source_seconds)
+        names = video_filenames(item["poster"], source_seconds, item.get("sequence"))
         raw_video = Path(item["raw_video"])
         if not raw_video.is_file():
             raise FileNotFoundError(f"Dreamina output missing for {task_id}")

@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 
 from jaguartv_postmatch.assets import _png_dimensions
-from jaguartv_postmatch.collector import parse_result_card_text
+from jaguartv_postmatch.collector import _api_football_event_result, match_api_football_event, parse_result_card_text
 from jaguartv_postmatch.lock import ProcessLock
 from jaguartv_postmatch.research import (
     is_match_specific_social_record,
@@ -220,11 +220,25 @@ Verified match-specific summary.
             self.assertNotEqual(initial, _artifact_revision([first, second]))
 
     def test_video_files_use_the_validated_chinese_poster_name(self) -> None:
-        names = video_filenames("/tmp/科林蒂安-0：1-桑托斯_260830_海报.png", 4)
-        self.assertEqual(names["raw_video"], "即梦动态-科林蒂安-0：1-桑托斯_260830_海报-4秒.mp4")
-        self.assertEqual(names["hook"], "动态钩子-科林蒂安-0：1-桑托斯_260830_海报-3秒.mp4")
-        self.assertEqual(names["final"], "成片-科林蒂安-0：1-桑托斯_260830_海报-12秒.mp4")
-        self.assertEqual(names["cover"], "封面-科林蒂安-0：1-桑托斯_260830_海报-1080x1920.jpg")
+        names = video_filenames("/tmp/科林蒂安-0：1-桑托斯_260830_海报.png", 4, "01")
+        self.assertEqual(names["raw_video"], "01科林蒂安-0：1-桑托斯_260830_海报_即梦动态_4秒.mp4")
+        self.assertEqual(names["hook"], "01科林蒂安-0：1-桑托斯_260830_海报_动态钩子_3秒.mp4")
+        self.assertEqual(names["final"], "01科林蒂安-0：1-桑托斯_260830_海报_成片_12秒.mp4")
+        self.assertEqual(names["cover"], "01科林蒂安-0：1-桑托斯_260830_海报_封面_1080x1920.jpg")
+
+    def test_api_football_final_result_maps_penalties(self) -> None:
+        event = {
+            "fixture": {"id": 123, "status": {"short": "PEN"}},
+            "teams": {"home": {"name": "Corinthians"}, "away": {"name": "Santos"}},
+            "goals": {"home": 1, "away": 1},
+            "score": {"extratime": {"home": 1, "away": 1}, "penalty": {"home": 4, "away": 5}},
+        }
+        self.assertIs(match_api_football_event(fixture(), [event]), event)
+        mapped = _api_football_event_result(event)
+        self.assertTrue(mapped["completed"])
+        self.assertEqual(mapped["result_status"], "PEN")
+        self.assertEqual(mapped["home_score"], 1)
+        self.assertEqual(mapped["penalty_shootout"], {"home": 4, "away": 5})
 
     def test_video_generation_scope_is_opening_hook_only(self) -> None:
         self.assertIn("opening poster hook", VIDEO_ASSEMBLY_POLICY)

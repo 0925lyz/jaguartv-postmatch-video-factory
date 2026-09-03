@@ -188,6 +188,7 @@ def finalize(package_dir: Path, item_id: str, workflow_identity: str) -> dict:
     metadata["metadata"]["package_public_url"] = public_url(config, relative_package)
     metadata["metadata"]["server_verified_at"] = now_iso()
     timestamp = now_iso()
+    match_time = metadata.get("match_time_brasilia") or metadata.get("match_time_sao_paulo")
     connection.execute(
         """UPDATE original_factory_items
            SET name=?,match_name=?,match_date=?,match_time_sao_paulo=?,channels_json=?,
@@ -195,7 +196,7 @@ def finalize(package_dir: Path, item_id: str, workflow_identity: str) -> dict:
            WHERE id=?""",
         (
             metadata["match_name"], metadata["match_name"], metadata["match_date"],
-            metadata["match_time_sao_paulo"], json.dumps(metadata["channels"], ensure_ascii=False),
+            match_time, json.dumps(metadata["channels"], ensure_ascii=False),
             metadata["generated_at"], json.dumps(metadata["match_info"], ensure_ascii=False),
             json.dumps(metadata["metadata"], ensure_ascii=False), timestamp, item_id,
         ),

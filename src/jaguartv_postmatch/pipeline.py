@@ -166,16 +166,25 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
     checks["task1_store"] = {
         "available": (_path(config, "collector_root") / ".runtime/retention/fixtures.db").is_file()
     }
+    result_sources = config.get("result_sources") or {}
+    checks["api_football"] = {
+        "available": _credential_available(str(result_sources.get("api_football_key_env") or "API_FOOTBALL_KEY")),
+        "provider": "primary official post-match result source",
+        "endpoint": result_sources.get("api_football_endpoint", "https://v3.football.api-sports.io/fixtures"),
+    }
     missing = [name for name, check in checks.items() if not check.get("available")]
+    optional = {"image2_apimart"}
+    if not (config.get("result_sources") or {}).get("api_football_required", False):
+        optional.add("api_football")
     return {
         "checked_at": utc_now(),
         "checks": checks,
         "required_missing": [
             name
             for name in missing
-            if name not in {"image2_apimart"}
+            if name not in optional
         ],
-        "optional_unavailable": [name for name in missing if name in {"image2_apimart"}],
+        "optional_unavailable": [name for name in missing if name in optional],
     }
 
 
@@ -214,6 +223,7 @@ def run_phase1(config: dict[str, Any], target_date: date) -> dict[str, Any]:
                 str(config["source_url"]),
                 fixtures,
                 target_date,
+                config.get("result_sources") or {},
             )
             revisions = []
             for result in completed:

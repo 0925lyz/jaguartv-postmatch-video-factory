@@ -76,6 +76,10 @@ TEAM_ALIASES = {
     "wolfsberger ac": "wolfsberger",
     "norwich": "norwich city",
     "fbc melgar": "melgar",
+    # 09-02 copa.jarg.top (short) <-> ESPN displayName (full) bridging
+    "vasco da gama": "vasco",
+    "velez sarsfield": "velez",
+    "boca juniors": "boca",
 }
 
 

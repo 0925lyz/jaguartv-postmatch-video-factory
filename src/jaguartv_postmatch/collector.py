@@ -10,10 +10,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .credentials import env_or_keychain
 from .task1 import Task1Fixture
 from .util import canonical_team, normalize_name
 
 
+API_FOOTBALL_ENDPOINT = "https://v3.football.api-sports.io/fixtures"
+API_FOOTBALL_FINAL_STATES = {"FT", "AET", "PEN"}
 LEAGUE_SLUGS = {
     "premier league": "eng.1",
     "la liga": "esp.1",
@@ -25,6 +28,7 @@ FINAL_STATUS_NAMES = {
     "STATUS_FINAL": "FT",
     "STATUS_END_OF_EXTRA_TIME": "AET",
     "STATUS_END_OF_PENALTIES": "PEN",
+    "STATUS_FINAL_PEN": "PEN",
 }
 
 
@@ -75,8 +79,20 @@ def _league_slug(competition: str) -> str:
         return "eng.1"
     if normalized.startswith("la liga"):
         return "esp.1"
-    if normalized.startswith("brasileirao serie a"):
+    if normalized.startswith("brasileirao"):
         return "bra.1"
+    if normalized.startswith("copa do brasil"):
+        return "bra.copa_do_brazil"
+    if normalized.startswith("copa argentina"):
+        return "arg.copa"
+    if normalized.startswith("serie b"):
+        return "bra.2"
+    if normalized.startswith("bundesliga"):
+        return "aut.1"
+    if normalized.startswith("championship"):
+        return "eng.2"
+    if normalized.startswith("primera division"):
+        return "per.1"
     if normalized.startswith("serie a"):
         return "ita.1"
     raise ValueError(f"no official status adapter for competition: {competition}")
@@ -91,7 +107,7 @@ def _fixture_status_slugs(fixture: Task1Fixture) -> set[str]:
     except (OSError, json.JSONDecodeError):
         fact_sources = []
     for source in fact_sources:
-        match = re.search(r"/soccer/([a-z0-9.]+)/scoreboard", str(source or ""))
+        match = re.search(r"/soccer/([a-z0-9._]+)/scoreboard", str(source or ""))
         if match:
             slugs.add(match.group(1))
     if not slugs:
@@ -123,6 +139,48 @@ def _read_json(url: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"invalid JSON response from {url}")
     return payload
+
+
+def _read_api_football(url: str, api_key: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        [
+            "/usr/bin/curl",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "30",
+            "--header",
+            "Accept: application/json",
+            "--header",
+            f"x-apisports-key: {api_key}",
+            url,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+    if not isinstance(payload, dict):
+        raise RuntimeError("invalid JSON response from API-Football")
+    return payload
+
+
+def fetch_api_football_results(
+    target_date: date,
+    key_name: str,
+    endpoint: str = API_FOOTBALL_ENDPOINT,
+    required: bool = False,
+) -> dict[str, Any]:
+    try:
+        api_key = env_or_keychain(key_name)
+    except Exception as error:
+        if required:
+            raise RuntimeError(f"API-Football credential unavailable: {key_name}") from error
+        return {"url": "", "events": [], "available": False}
+    url = f"{endpoint}?date={target_date.isoformat()}&timezone=America/Sao_Paulo"
+    payload = _read_api_football(url, api_key)
+    return {"url": url, "events": payload.get("response") or [], "available": True}
 
 
 def fetch_scoreboards(fixtures: list[Task1Fixture], target_date: date) -> dict[str, dict[str, Any]]:
@@ -165,6 +223,61 @@ def match_status_event(
     return candidates[0][0], candidates[0][1]
 
 
+def match_api_football_event(fixture: Task1Fixture, events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    fixture_id = str(fixture.source_fixture_id or "")
+    for event in events:
+        api_fixture_id = str(((event.get("fixture") or {}).get("id")) or "")
+        if fixture_id and fixture_id == api_fixture_id:
+            return event
+    candidates = []
+    for event in events:
+        teams = event.get("teams") or {}
+        home = ((teams.get("home") or {}).get("name")) or ""
+        away = ((teams.get("away") or {}).get("name")) or ""
+        if canonical_team(home) == canonical_team(fixture.home_team) and canonical_team(away) == canonical_team(fixture.away_team):
+            candidates.append(event)
+    if len(candidates) > 1:
+        raise RuntimeError(f"API-Football event is not unique for {fixture.task1_fixture_id}: {len(candidates)}")
+    return candidates[0] if candidates else None
+
+
+def _api_football_event_result(event: dict[str, Any]) -> dict[str, Any]:
+    fixture = event.get("fixture") or {}
+    status = fixture.get("status") or {}
+    status_short = str(status.get("short") or "")
+    if status_short not in API_FOOTBALL_FINAL_STATES:
+        return {"completed": False, "provider_status": status_short or "UNKNOWN"}
+    goals = event.get("goals") or {}
+    home_score = goals.get("home")
+    away_score = goals.get("away")
+    if home_score is None or away_score is None:
+        return {"completed": False, "provider_status": f"{status_short}_NO_SCORE"}
+    score = event.get("score") or {}
+    extratime = score.get("extratime") or {}
+    penalty = score.get("penalty") or {}
+    result_status = "PEN" if penalty.get("home") is not None or penalty.get("away") is not None else status_short
+    return {
+        "completed": True,
+        "result_status": result_status,
+        "provider_status": status_short,
+        "provider_name": "api-football",
+        "provider_match_id": str(fixture.get("id") or ""),
+        "provider_event_url": "",
+        "home_score": int(home_score),
+        "away_score": int(away_score),
+        "extra_time": (
+            {"home": int(extratime["home"]), "away": int(extratime["away"])}
+            if extratime.get("home") is not None and extratime.get("away") is not None
+            else None
+        ),
+        "penalty_shootout": (
+            {"home": int(penalty["home"]), "away": int(penalty["away"])}
+            if result_status == "PEN"
+            else None
+        ),
+    }
+
+
 def _event_result(event: dict[str, Any]) -> dict[str, Any]:
     status = event.get("status") or {}
     status_type = status.get("type") or {}
@@ -190,6 +303,7 @@ def _event_result(event: dict[str, Any]) -> dict[str, Any]:
         "completed": True,
         "result_status": result_status,
         "provider_status": status_name,
+        "provider_name": "espn",
         "provider_match_id": str(event.get("id") or ""),
         "provider_event_url": summary_url,
         "home_score": int(home.get("score")),
@@ -241,14 +355,22 @@ def collect_completed_results(
     source_url: str,
     fixtures: list[Task1Fixture],
     target_date: date,
+    result_sources: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    result_sources = result_sources or {}
     cards, source_updated_text = asyncio.run(
         scrape_yesterday_cards(collector_root, source_url, fixtures)
     )
     cards_by_pair = {
         (canonical_team(card.home_team), canonical_team(card.away_team)): card for card in cards
     }
-    scoreboards = fetch_scoreboards(fixtures, target_date)
+    api_football = fetch_api_football_results(
+        target_date,
+        str(result_sources.get("api_football_key_env") or "API_FOOTBALL_KEY"),
+        str(result_sources.get("api_football_endpoint") or API_FOOTBALL_ENDPOINT),
+        bool(result_sources.get("api_football_required", False)),
+    )
+    scoreboards: dict[str, dict[str, Any]] | None = None
     retrieved_at = datetime.now(timezone.utc).isoformat()
     completed: list[dict[str, Any]] = []
     unfinished: list[dict[str, Any]] = []
@@ -257,7 +379,13 @@ def collect_completed_results(
         provider: dict[str, Any]
         status_source_url = source_url
         fixture_slugs = _fixture_status_slugs(fixture)
-        if fixture_slugs:
+        api_event = match_api_football_event(fixture, api_football["events"])
+        if api_event is not None:
+            status_source_url = api_football["url"]
+            provider = _api_football_event_result(api_event)
+        elif fixture_slugs:
+            if scoreboards is None:
+                scoreboards = fetch_scoreboards(fixtures, target_date)
             event, status_source_url = match_status_event(fixture, scoreboards)
             provider = _event_result(event)
         else:
@@ -265,6 +393,7 @@ def collect_completed_results(
                 "completed": True,
                 "result_status": "FT",
                 "provider_status": "SOURCE_CARD_FINAL",
+                "provider_name": "copa-source-card",
                 "provider_match_id": fixture.task1_fixture_id,
                 "provider_event_url": "",
                 "home_score": card.home_score,
@@ -285,6 +414,8 @@ def collect_completed_results(
             "channels": fixture.channels,
             "official_source_url": source_url,
             "status_verification_url": status_source_url,
+            "api_football_url": api_football["url"],
+            "api_football_matched": api_event is not None,
             "retrieval_timestamp": retrieved_at,
             "source_updated_text": source_updated_text,
             "original_result_text": card.original_result_text,
@@ -296,12 +427,20 @@ def collect_completed_results(
             unfinished.append(base)
             continue
         if (
-            fixture_slugs
+            (api_event is not None or fixture_slugs)
             and (card.home_score, card.away_score) != (provider["home_score"], provider["away_score"])
         ):
-            raise RuntimeError(
-                f"source score mismatch for {fixture.task1_fixture_id}: "
-                f"copa={card.home_score}-{card.away_score}, status={provider['home_score']}-{provider['away_score']}"
-            )
+            if "AO VIVO" in card.original_result_text.upper():
+                # copa.jarg.top still lists the match as live (stale card); trust the
+                # authoritative final score provider instead of failing closed.
+                base["source_score_mismatch_warning"] = (
+                    f"copa_live={card.home_score}-{card.away_score}, "
+                    f"status={provider['home_score']}-{provider['away_score']} (trusted {provider['provider_name']} final)"
+                )
+            else:
+                raise RuntimeError(
+                    f"source score mismatch for {fixture.task1_fixture_id}: "
+                    f"copa={card.home_score}-{card.away_score}, status={provider['home_score']}-{provider['away_score']}"
+                )
         completed.append(base)
     return completed, unfinished

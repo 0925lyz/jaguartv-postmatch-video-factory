@@ -28,6 +28,9 @@ These rules apply to every task and automation in this repository.
 ## Post-match invariants
 
 - Process only fixtures already selected upstream by Task 1.
+- The scheduled daily post-match collection starts at 01:00 Brasília.
+- Use API-Football as the primary official post-match score source; keep copa.jarg.top as the
+  Task 1/channel/source-page cross-check.
 - Continue only for official `FT`, `AET`, or `PEN` results.
 - Link results by stable fixture ID, with a validated composite key only as fallback.
 - Use `Horário de Brasília` for every public date and time.
@@ -38,5 +41,7 @@ These rules apply to every task and automation in this repository.
 - Keep faces unobstructed and place score panels below the face-safe region.
 - Use the complete poster as the exact first video frame and cover; never crop poster content.
 - Generated video filenames must be Chinese.
+- Prefix generated video filenames in production order with `01`, `02`, `03` and keep captions in
+  the same order without numbering inside the public text.
 - Upload only validated artifacts to Pending Review under the exact label `赛后比分`.
 - Stop at the first unavailable required integration and emit a sanitized failure report.

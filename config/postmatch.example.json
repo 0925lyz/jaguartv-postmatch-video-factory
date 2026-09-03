@@ -2,7 +2,7 @@
   "schema_version": "jaguartv-postmatch-config-v1",
   "timezone": "America/Sao_Paulo",
   "public_timezone_label": "Horário de Brasília",
-  "schedule": "01:30",
+  "schedule": "01:00",
   "source_url": "https://copa.jarg.top/jogos-de-hoje",
   "collector_root": "${JAGUARTV_COLLECTOR_ROOT}",
   "system_prompts_and_models": "${JAGUARTV_SYSTEM_PROMPTS_ROOT}",
@@ -17,7 +17,9 @@
   "result_sources": {
     "official_site": "https://copa.jarg.top/jogos-de-hoje",
     "api_football_key_env": "API_FOOTBALL_KEY",
-    "api_football_optional": true
+    "api_football_required": true,
+    "api_football_endpoint": "https://v3.football.api-sports.io/fixtures",
+    "cross_check_official_site": true
   },
   "image2": {
     "primary_provider": "active-large-model-api",
@@ -69,5 +71,11 @@
     "ssh_alias": "jarg-tencent",
     "remote_app_dir": "/opt/jaguartv-content-factory-vnext",
     "remote_dashboard_port": 8788
+  },
+  "delivery": {
+    "posters_dir": "~/Desktop/每日赛后海报",
+    "videos_dir": "~/Desktop/赛后比分",
+    "captions_order": "video_filename_01_02_03",
+    "lark_sample_policy": "first_validated_video_excluded_from_server_delivery"
   }
 }

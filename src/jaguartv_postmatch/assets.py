@@ -88,9 +88,12 @@ def materialize_player_assets(research_dir: Path, image2_database: Path) -> dict
                 )
         research["licensed_player_assets"] = usable
         research["player_asset_failures"] = failures
+        # Only escalate to real-player likeness when assets were actually materialized
+        # AND carry a verified commercial-reuse record. Candidate-only (download failed)
+        # matches must NOT claim real-player identity — fall back to virtual hardman.
         research["poster_identity_mode"] = (
             "verified-real-player-likeness"
-            if usable or research.get("visual_candidates")
+            if usable
             else "virtual-hardman-player"
         )
         temporary = research_path.with_suffix(".json.tmp")

@@ -10,7 +10,7 @@ selection, kickoff time, channel identity, and stable fixture IDs. Task 3 never 
 | Phase | Input | Output | Hard gate |
 |---|---|---|---|
 | 0 | Local config and integrations | Preflight report | Every required dependency exists |
-| 1 | Task 1 fixtures plus official results | Versioned result records | Status is FT, AET, or PEN |
+| 1 | Task 1 fixtures plus API-Football official results | Versioned result records | Status is FT, AET, or PEN |
 | 2 | One completed match | Evidence and participant records | Match-specific sources only |
 | 3 | Verified result and research | Image2 prompt, 4:5 poster, QA | Score, winner, player, logo, face safety |
 | 4 | Validated poster plus existing V7 inventory | Generated 3-4 second poster hook, 12-second stitched video, cover, manifests | Only hook is generated; later segments are inventory |
@@ -22,6 +22,7 @@ revision and regenerates unpublished artifacts without creating a second logical
 ## Reused resources
 
 - `tomorrow-fixtures-automation`: browser collector and Task 1 fixture database.
+- `API-Football`: primary post-match result source at the 01:00 Brasília daily run.
 - `image2数据库`: current player, crest, kit, channel, prompt, and style inventory.
 - `system-prompts-and-models-of-ai-tools`: configured prompt routing for the current task model.
 - `jaguartv-v7-pack`: operation clips, CTA, music, voice inventory, and video compositor.
@@ -37,6 +38,7 @@ master. Downloader/search/main-interface segments, CTA, music, and voiceover are
 per match; they are selected from existing authorized inventory and stitched into the final video.
 During that hook, the poster background should animate and the players may show strong score-based
 emotion. The fixed upper-right Figure 1 logo, score, crests, and date must stay unchanged.
+Final video filenames are ordered with a Chinese `01`/`02`/`03` prefix matching caption order.
 
 ## Failure behavior
 

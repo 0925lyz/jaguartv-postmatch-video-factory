@@ -161,7 +161,18 @@ def _upload_original(video: Path, metadata: dict[str, Any], base_url: str, token
 
 def _stage_remote_package(ssh_alias: str, package_dir: Path) -> str:
     remote_root = "/tmp/jaguartv-postmatch-incoming"
-    _run(["scp", "-r", str(package_dir), f"{ssh_alias}:{remote_root}/"], timeout=300)
+    # Compression + keepalive make the staging transfer resilient over slower links;
+    # a generous timeout avoids aborting on transient stalls (default was 300s).
+    _run(
+        [
+            "scp", "-C",
+            "-o", "ConnectTimeout=30",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=20",
+            "-r", str(package_dir), f"{ssh_alias}:{remote_root}/",
+        ],
+        timeout=900,
+    )
     return f"{remote_root}/{package_dir.name}"
 
 
@@ -254,7 +265,7 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
 
     drafts = []
     upload_results = []
-    for item in build["items"]:
+    for item in sorted(build["items"], key=lambda value: str(value.get("sequence") or "")):
         task_id = item["task_id"]
         poster = posters[task_id]
         match_results = [results[value] for value in poster["match_ids"]]
@@ -303,7 +314,7 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "category": "post_match_score",
             "match_name": match_name,
             "match_date": target_date.isoformat(),
-            "match_time_sao_paulo": f"{target_date.isoformat()}T{kickoff}:00-03:00",
+            "match_time_brasilia": f"{target_date.isoformat()}T{kickoff}:00-03:00",
             "channels": channels or ["Jaguar TV"],
             "generated_at": item.get("completed_at") or item.get("created_at"),
             "match_info": {

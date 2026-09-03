@@ -143,6 +143,7 @@ CHANNEL_FILES = {
     "ESPN 4": "ESPN_4.png",
     "NSPORTS": "NSPORTS.png",
     "FANATIZ": "FANATIZ.png",
+    "XSPORTS": "XSports.png",
 }
 
 STYLE_DIRECTIONS = [
@@ -252,6 +253,12 @@ def match_visual_direction(
     record: dict[str, Any], override: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     result = record["result"]
+    # Compliance gate: only supply real player names to Image2 when the match actually
+    # carries verified, license-recorded real-player assets. In virtual-hardman mode the
+    # poster prompt must fall back to an anonymous fictional hardman footballer and must
+    # NOT generate real-player likenesses (no verified commercial-reuse basis).
+    identity_mode = (record.get("research") or {}).get("poster_identity_mode", "virtual-hardman-player")
+    allow_real_players = identity_mode == "verified-real-player-likeness"
     home_score, away_score = int(result["home_score"]), int(result["away_score"])
     if home_score == away_score:
         draw_visual: dict[str, Any] = {
@@ -260,15 +267,16 @@ def match_visual_direction(
             "away_side": "right",
             "direction": "balanced restrained tension; neither side celebrates as a winner",
         }
-        # Configured visual policy prefers verified participants and allows a virtual
-        # player only when no verified participant exists, so a draw must still expose
-        # its verified real participants instead of silently degrading to a fictional one.
-        home_player = _featured_player(record["research"], str(result["home_team"]), prefer_goal=True)
-        away_player = _featured_player(record["research"], str(result["away_team"]), prefer_goal=True)
-        if home_player:
-            draw_visual["home_player"] = home_player
-        if away_player:
-            draw_visual["away_player"] = away_player
+        if allow_real_players:
+            # Configured visual policy prefers verified participants and allows a virtual
+            # player only when no verified participant exists, so a draw must still expose
+            # its verified real participants instead of silently degrading to a fictional one.
+            home_player = _featured_player(record["research"], str(result["home_team"]), prefer_goal=True)
+            away_player = _featured_player(record["research"], str(result["away_team"]), prefer_goal=True)
+            if home_player:
+                draw_visual["home_player"] = home_player
+            if away_player:
+                draw_visual["away_player"] = away_player
         return draw_visual
 
     winner_side = "left" if home_score > away_score else "right"
@@ -286,12 +294,13 @@ def match_visual_direction(
         "loser_side": loser_side,
         "loser_emotion": "clearly disappointed and dejected",
     }
-    winner_player = _featured_player(record["research"], str(winner_team), prefer_goal=True)
-    loser_player = _featured_player(record["research"], str(loser_team), prefer_goal=False)
-    if winner_player:
-        visual["winner_player"] = winner_player
-    if loser_player:
-        visual["loser_player"] = loser_player
+    if allow_real_players:
+        winner_player = _featured_player(record["research"], str(winner_team), prefer_goal=True)
+        loser_player = _featured_player(record["research"], str(loser_team), prefer_goal=False)
+        if winner_player:
+            visual["winner_player"] = winner_player
+        if loser_player:
+            visual["loser_player"] = loser_player
     if override:
         for key in (
             "winner_team", "winner_player", "winner_emotion", "winner_reference",
@@ -474,8 +483,10 @@ Validated fact brief follows. Do not alter any score, team, competition, date, s
 
 
 def _single_filename(result: dict[str, Any], target_date: date) -> str:
-    home = CHINESE_TEAMS[result["home_team"].upper()]
-    away = CHINESE_TEAMS[result["away_team"].upper()]
+    # Fall back to the verified team name when no Chinese mapping exists, so unmapped
+    # teams (e.g. Argentine clubs) do not crash poster generation.
+    home = CHINESE_TEAMS.get(result["home_team"].upper(), result["home_team"])
+    away = CHINESE_TEAMS.get(result["away_team"].upper(), result["away_team"])
     return f"{home}-{result['home_score']}：{result['away_score']}-{away}_{target_date.strftime('%y%m%d')}_海报.png"
 
 
