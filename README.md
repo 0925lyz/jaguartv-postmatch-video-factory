@@ -20,6 +20,7 @@ GitHub: `0925lyz/jaguartv-postmatch-video-factory`
 9. 幂等上传到 Pending Review 的 `赛后比分` 标签，不自动发布；桌面交付目录为 `每日赛后海报` 和 `赛后比分`。
 
 海报风格优先保留最新 WorkBuddy 赛后批次已认可的构造：真人球星、强景深、干净戏剧背景、大比分层级、明确胜负情绪。找不到可验证真人信息时，使用匿名虚拟硬汉球员；项目内球员、队徽和球衣素材按操作员授权处理。
+队徽会优先复用 `image2数据库/assets/crests` 全库；任务一 manifest 路径失效或当天目录缺失时，会自动缓存官方来源队徽到当天目录，不再因授权占位要求跳过比赛。
 
 海报背景生成方法与贴字注意事项见 [docs/poster-master-prompt.md](docs/poster-master-prompt.md) 与 [docs/poster-production-rules.md](docs/poster-production-rules.md)。
 
