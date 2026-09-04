@@ -11,7 +11,11 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 from jaguartv_factory.core import connect_db, load_config, now_iso
-from jaguartv_factory.original_factory import _audit, original_storage_root
+from jaguartv_factory.original_factory import (
+    _audit,
+    import_original_video,
+    original_storage_root,
+)
 from jaguartv_factory.server_store import public_url, storage_root
 
 
@@ -250,19 +254,70 @@ def finalize(package_dir: Path, item_id: str, workflow_identity: str) -> dict:
     }
 
 
+def import_original(package_dir: Path, workflow_identity: str) -> dict:
+    """Create a PENDING_REVIEW original record directly on the server.
+
+    This runs inside the application venv on the server, reading the staged
+    ``final-video.mp4`` and ``upload-metadata.json`` from the package directory.
+    It calls ``import_original_video`` with a local file stream, which avoids
+    sending the (4-10 MB) video body through the SSH tunnel — the dashboard
+    resets large POST bodies tunneled over SSH, but accepts large bodies on
+    localhost.
+    """
+    incoming_root = Path("/tmp/jaguartv-postmatch-incoming").resolve()
+    package_dir = package_dir.resolve()
+    if incoming_root not in package_dir.parents:
+        raise ValueError("package must be inside the controlled incoming root")
+    metadata_path = package_dir / "upload-metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("metadata", {}).get("workflow_identity") != workflow_identity:
+        raise ValueError("workflow identity does not match package metadata")
+    video_path = package_dir / "final-video.mp4"
+    if not video_path.is_file():
+        raise ValueError("final-video.mp4 is missing from the package")
+    revision = metadata["metadata"]["artifact_revision"]
+    config = load_config()
+    with video_path.open("rb") as stream:
+        result = import_original_video(
+            config,
+            stream,
+            filename=video_path.name,
+            mime_type="video/mp4",
+            content_length=video_path.stat().st_size,
+            category=metadata.get("category"),
+            match_name=metadata.get("match_name"),
+            match_date=metadata.get("match_date"),
+            match_time_sao_paulo=metadata.get("match_time_sao_paulo")
+            or metadata.get("match_time_brasilia"),
+            channels=metadata.get("channels"),
+            match_info=metadata.get("match_info"),
+            social_sources=metadata.get("social_sources"),
+            generated_at=metadata.get("generated_at"),
+            actor="postmatch-worker",
+            request_id=f"postmatch-{revision[:32]}",
+            batch_size=1,
+            metadata=metadata.get("metadata"),
+        )
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("inspect", "finalize"))
+    parser.add_argument("mode", choices=("inspect", "finalize", "import"))
     parser.add_argument("--workflow-identity", required=True)
     parser.add_argument("--package-dir", type=Path)
     parser.add_argument("--item-id", default="")
     args = parser.parse_args()
     if args.mode == "inspect":
         result = inspect(args.workflow_identity)
-    else:
+    elif args.mode == "finalize":
         if not args.package_dir or not args.item_id:
             raise ValueError("finalize requires package-dir and item-id")
         result = finalize(args.package_dir, args.item_id, args.workflow_identity)
+    else:
+        if not args.package_dir:
+            raise ValueError("import requires package-dir")
+        result = import_original(args.package_dir, args.workflow_identity)
     print(json.dumps(result, ensure_ascii=False))
 
 

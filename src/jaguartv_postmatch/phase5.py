@@ -245,10 +245,8 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
     ssh_alias = str(server["ssh_alias"])
     remote_app = str(server["remote_app_dir"])
     helper = _install_remote_helper(ssh_alias)
-    tunnel: subprocess.Popen[str] | None = None
-    base_url = ""
     connectivity = True
-    connectivity_method = "authenticated SSH server adapter"
+    connectivity_method = "authenticated server-side import over SSH"
 
     phase1 = json.loads((run_dir / "phase1" / "results.json").read_text(encoding="utf-8"))
     results = {item["task1_fixture_id"]: item for item in phase1["results"]}
@@ -314,7 +312,7 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "category": "post_match_score",
             "match_name": match_name,
             "match_date": target_date.isoformat(),
-            "match_time_brasilia": f"{target_date.isoformat()}T{kickoff}:00-03:00",
+            "match_time_sao_paulo": f"{target_date.isoformat()}T{kickoff}:00-03:00",
             "channels": channels or ["Jaguar TV"],
             "generated_at": item.get("completed_at") or item.get("created_at"),
             "match_info": {
@@ -365,18 +363,20 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
                 raise RuntimeError(f"server record for {task_id} is no longer pending review")
             item_id = current["id"]
             upload_action = "REUSED" if current["sha256"] == metadata["metadata"]["video_sha256"] else "CORRECTED"
+            remote_package = None
         else:
-            if tunnel is None:
-                tunnel, base_url = _start_ssh_tunnel(
-                    ssh_alias, int(server.get("remote_dashboard_port", 8788))
-                )
-                atexit.register(_stop_tunnel, tunnel)
-                connectivity = _server_connectivity(base_url, dashboard_token)
-                connectivity_method = "authenticated local API over SSH tunnel"
-                if not connectivity:
-                    raise RuntimeError("authenticated Pending Review connectivity check failed")
-            uploaded = _upload_original(video_path, metadata, base_url, upload_token)
-            item_id = str(uploaded["id"])
+            # Stage the package on the server, then import server-side (no SSH tunnel for
+            # the video body). The dashboard resets POST bodies >~3 MB tunneled over SSH,
+            # but accepts large bodies on localhost; import_original_video reads a local
+            # file stream, so this avoids the tunnel large-body defect entirely.
+            remote_package = _stage_remote_package(ssh_alias, package_dir)
+            imported = _remote_json(
+                ssh_alias, remote_app, helper,
+                ["import", "--workflow-identity", workflow_identity, "--package-dir", remote_package],
+            )
+            if imported.get("status_id") != "PENDING_REVIEW" or not imported.get("id"):
+                raise RuntimeError(f"server import did not create a pending review record for {task_id}")
+            item_id = str(imported["id"])
             upload_action = "CREATED"
 
         reusable = bool(
@@ -398,7 +398,8 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
                 "video_replaced": False,
             }
         else:
-            remote_package = _stage_remote_package(ssh_alias, package_dir)
+            if remote_package is None:
+                remote_package = _stage_remote_package(ssh_alias, package_dir)
             verified = _remote_json(
                 ssh_alias,
                 remote_app,
@@ -493,9 +494,6 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
         "upload_report": str(report_path.resolve()),
         "upload_ids": [item["upload_id"] for item in upload_results],
     }
-    if tunnel is not None:
-        _stop_tunnel(tunnel)
-        atexit.unregister(_stop_tunnel)
     return result
 
 

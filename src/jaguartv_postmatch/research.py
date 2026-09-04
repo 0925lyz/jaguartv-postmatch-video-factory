@@ -344,13 +344,35 @@ def research_match(result: dict[str, Any]) -> dict[str, Any]:
     english_date, portuguese_date = _research_date_text(result)
     structured = str(result.get("provider_status") or "") != "SOURCE_CARD_FINAL"
     if structured:
-        slug = _league_slug(str(result["competition"]))
-        event_id = str(result["provider_match_id"])
-        summary_url = (
-            "https://site.api.espn.com/apis/site/v2/sports/soccer/"
-            f"{slug}/summary?event={event_id}"
-        )
-        summary = _curl_json(summary_url)
+        summary = {}
+        summary_url = str(result.get("status_verification_url") or result.get("official_source_url") or "")
+        try:
+            slug = _league_slug(str(result["competition"]))
+        except ValueError as exc:
+            # No ESPN adapter for this competition (e.g. a long-form league name).
+            # Degrade gracefully and rely on the web/X research fallbacks instead
+            # of aborting the whole pipeline for one unavailable structured feed.
+            slug = ""
+            print(
+                f"[warn] no ESPN league adapter for competition="
+                f"{result['competition']!r}; continuing with web/X research only: {exc}"
+            )
+        if slug:
+            event_id = str(result["provider_match_id"])
+            summary_url = (
+                "https://site.api.espn.com/apis/site/v2/sports/soccer/"
+                f"{slug}/summary?event={event_id}"
+            )
+            # Non-fatal: ESPN's event id namespace differs from API-Football's
+            # provider_match_id, so this 404s for API-Football-sourced fixtures.
+            try:
+                summary = _curl_json(summary_url)
+            except Exception as exc:
+                summary = {}
+                print(
+                    f"[warn] ESPN structured fetch failed for event={event_id} "
+                    f"({slug}); continuing with web/X research only: {exc}"
+                )
     else:
         summary = {}
         summary_url = str(result.get("status_verification_url") or result.get("official_source_url") or "")

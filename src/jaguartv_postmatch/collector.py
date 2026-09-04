@@ -81,6 +81,10 @@ def _league_slug(competition: str) -> str:
         return "esp.1"
     if normalized.startswith("brasileirao"):
         return "bra.1"
+    if normalized.startswith("campeonato brasileiro"):
+        if "serie b" in normalized:
+            return "bra.2"
+        return "bra.1"
     if normalized.startswith("copa do brasil"):
         return "bra.copa_do_brazil"
     if normalized.startswith("copa argentina"):
@@ -214,13 +218,31 @@ def match_status_event(
             teams = _event_teams(event)
             home = ((teams.get("home") or {}).get("team") or {}).get("displayName") or ""
             away = ((teams.get("away") or {}).get("team") or {}).get("displayName") or ""
-            if canonical_team(home) == canonical_team(fixture.home_team) and canonical_team(away) == canonical_team(fixture.away_team):
+            if _team_match(fixture.home_team, home) and _team_match(fixture.away_team, away):
                 candidates.append((event, str(entry["url"]), slug))
     if len(candidates) != 1:
         raise RuntimeError(
             f"official status event is not unique for {fixture.task1_fixture_id}: {len(candidates)}"
         )
     return candidates[0][0], candidates[0][1]
+
+
+def _team_match(fixture_team: str, provider_team: str) -> bool:
+    """Loose team-name equality tolerant of provider name suffixes.
+
+    API-Football/ESPN often append the city/state to a club name (e.g.
+    "Nautico Recife" vs the fixture's "Náutico"). Accept an exact canonical match
+    or a token-subset relation in either direction, so the shorter fixture name
+    still links to the provider's longer one. Callers match the full (home, away)
+    pair, which keeps this safe against coincidental single-side overlaps.
+    """
+    cf = canonical_team(fixture_team)
+    cp = canonical_team(provider_team)
+    if cf == cp:
+        return True
+    tf = set(cf.split())
+    tp = set(cp.split())
+    return bool(tf) and bool(tp) and (tf <= tp or tp <= tf)
 
 
 def match_api_football_event(fixture: Task1Fixture, events: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -234,7 +256,7 @@ def match_api_football_event(fixture: Task1Fixture, events: list[dict[str, Any]]
         teams = event.get("teams") or {}
         home = ((teams.get("home") or {}).get("name")) or ""
         away = ((teams.get("away") or {}).get("name")) or ""
-        if canonical_team(home) == canonical_team(fixture.home_team) and canonical_team(away) == canonical_team(fixture.away_team):
+        if _team_match(fixture.home_team, home) and _team_match(fixture.away_team, away):
             candidates.append(event)
     if len(candidates) > 1:
         raise RuntimeError(f"API-Football event is not unique for {fixture.task1_fixture_id}: {len(candidates)}")
@@ -321,7 +343,15 @@ async def scrape_yesterday_cards(
     collector_root: Path,
     source_url: str,
     fixtures: list[Task1Fixture],
-) -> tuple[list[SourceCard], str]:
+) -> tuple[list[SourceCard], list[str], list[str], str]:
+    """Return ``(selected_cards, missing_fixture_ids, ambiguous_fixture_ids, source_updated_text)``.
+
+    copa.jarg.top is a *cross-check* source (API-Football is the primary result
+    source, per AGENTS.md). A fixture that yields 0 cards is reported as ``missing``
+    and processed from the authoritative provider instead of crashing the whole run.
+    A fixture that yields more than one card is reported as ``ambiguous`` (first
+    match kept) so the operator can review it without blocking production.
+    """
     sys.path.insert(0, str(collector_root / "src"))
     from tomorrow_fixtures.collection.browser import BrowserSession
     from tomorrow_fixtures.collection.page import activate_date, activate_featured, fixture_cards, verify_source_page
@@ -329,6 +359,8 @@ async def scrape_yesterday_cards(
 
     settings = Settings(source_url=source_url)
     selected: list[SourceCard] = []
+    missing: list[str] = []
+    ambiguous: list[str] = []
     async with BrowserSession(settings) as page:
         source_updated_text = await verify_source_page(page, source_url)
         await activate_date(page, "Ontem")
@@ -342,12 +374,14 @@ async def scrape_yesterday_cards(
                     matches.append(parse_result_card_text(raw, fixture.home_team, fixture.away_team))
                 except ValueError:
                     continue
-            if len(matches) != 1:
-                raise RuntimeError(
-                    f"copa.jarg.top result card is not unique for {fixture.task1_fixture_id}: {len(matches)}"
-                )
-            selected.append(matches[0])
-    return selected, source_updated_text
+            if len(matches) == 1:
+                selected.append(matches[0])
+            elif len(matches) == 0:
+                missing.append(fixture.task1_fixture_id)
+            else:
+                ambiguous.append(fixture.task1_fixture_id)
+                selected.append(matches[0])
+    return selected, missing, ambiguous, source_updated_text
 
 
 def collect_completed_results(
@@ -358,9 +392,10 @@ def collect_completed_results(
     result_sources: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     result_sources = result_sources or {}
-    cards, source_updated_text = asyncio.run(
+    cards, missing_ids, ambiguous_ids, source_updated_text = asyncio.run(
         scrape_yesterday_cards(collector_root, source_url, fixtures)
     )
+    ambiguous_set = set(ambiguous_ids)
     cards_by_pair = {
         (canonical_team(card.home_team), canonical_team(card.away_team)): card for card in cards
     }
@@ -375,7 +410,10 @@ def collect_completed_results(
     completed: list[dict[str, Any]] = []
     unfinished: list[dict[str, Any]] = []
     for fixture in fixtures:
-        card = cards_by_pair[(canonical_team(fixture.home_team), canonical_team(fixture.away_team))]
+        card = cards_by_pair.get(
+            (canonical_team(fixture.home_team), canonical_team(fixture.away_team))
+        )
+        has_card = card is not None
         provider: dict[str, Any]
         status_source_url = source_url
         fixture_slugs = _fixture_status_slugs(fixture)
@@ -388,7 +426,7 @@ def collect_completed_results(
                 scoreboards = fetch_scoreboards(fixtures, target_date)
             event, status_source_url = match_status_event(fixture, scoreboards)
             provider = _event_result(event)
-        else:
+        elif has_card:
             provider = {
                 "completed": True,
                 "result_status": "FT",
@@ -401,6 +439,21 @@ def collect_completed_results(
                 "extra_time": None,
                 "penalty_shootout": None,
             }
+        else:
+            # No source-page card AND no authoritative provider (API-Football /
+            # status event). copa.jarg.top is only a cross-check, so without an
+            # authoritative score we cannot safely finalize this fixture.
+            unfinished.append(
+                {
+                    "task1_fixture_id": fixture.task1_fixture_id,
+                    "competition": fixture.competition,
+                    "home_team": fixture.home_team,
+                    "away_team": fixture.away_team,
+                    "reason": "no_source_card_and_no_provider",
+                    "source_card_missing": True,
+                }
+            )
+            continue
         base = {
             "task1_fixture_id": fixture.task1_fixture_id,
             "source_fixture_id": fixture.source_fixture_id,
@@ -418,7 +471,9 @@ def collect_completed_results(
             "api_football_matched": api_event is not None,
             "retrieval_timestamp": retrieved_at,
             "source_updated_text": source_updated_text,
-            "original_result_text": card.original_result_text,
+            "original_result_text": card.original_result_text if has_card else "",
+            "source_card_missing": (not has_card),
+            "source_card_ambiguous": fixture.task1_fixture_id in ambiguous_set,
             "task1_manifest": fixture.source_manifest,
             "task1_pre_match_poster": fixture.pre_match_poster,
             **provider,
@@ -428,6 +483,7 @@ def collect_completed_results(
             continue
         if (
             (api_event is not None or fixture_slugs)
+            and has_card
             and (card.home_score, card.away_score) != (provider["home_score"], provider["away_score"])
         ):
             if "AO VIVO" in card.original_result_text.upper():
