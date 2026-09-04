@@ -35,6 +35,8 @@
   "visual_policy": {
     "prefer_verified_real_players": true,
     "virtual_player_only_when_no_verified_participant": true,
+    "official_crests_authorized": true,
+    "auto_cache_missing_crests": true,
     "score_panel_top_px": 760,
     "face_safe_zone_bottom_px": 720
   },

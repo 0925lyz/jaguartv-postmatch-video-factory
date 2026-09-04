@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from jaguartv_postmatch.assets import _png_dimensions
 from jaguartv_postmatch.collector import _api_football_event_result, match_api_football_event, parse_result_card_text
@@ -19,6 +20,7 @@ from jaguartv_postmatch.voice import cta_voice_filename
 from jaguartv_postmatch.phase5 import _artifact_revision
 from jaguartv_postmatch.store import WorkflowStore
 from jaguartv_postmatch.task1 import Task1Fixture
+from jaguartv_postmatch.task1 import load_task1_fixtures
 from jaguartv_postmatch.util import single_poster_filename
 
 
@@ -104,6 +106,41 @@ ASSISTIR JOGO""",
         name = single_poster_filename("科林蒂安", 2, 1, "帕尔梅拉斯", "260923")
         self.assertEqual(name, "科林蒂安-2：1-帕尔梅拉斯_260923_海报.png")
         self.assertNotIn(":", name)
+
+    def test_task1_loader_reuses_authorized_crest_library_when_manifest_path_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_db = root / "image2数据库"
+            production = image_db / "outputs" / "260903_prematch_image2"
+            production.mkdir(parents=True)
+            (image_db / "assets" / "crests" / "260901").mkdir(parents=True)
+            (image_db / "assets" / "crests" / "260901" / "Nautico.png").write_bytes(b"crest")
+            (production / "Botafogo-SP.png").write_bytes(b"crest")
+            (production / "poster.png").write_bytes(b"poster")
+            manifest = {
+                "match": {
+                    "match_id": "manual-20260903-nautico-botafogo-sp",
+                    "competition": "SÉRIE C",
+                    "home": "NÁUTICO",
+                    "away": "BOTAFOGO-SP",
+                    "brasilia_date": "03 SET 2026",
+                    "brasilia_time": "20H00",
+                    "channels": "YOUTUBE",
+                },
+                "assets": {
+                    "home_crest": "missing/Nautico.png",
+                    "away_crest": "Botafogo-SP.png",
+                },
+                "generation": {"final_poster": "poster.png"},
+            }
+            (production / "production_manifest_nautico_botafogo_sp.json").write_text(
+                json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+            )
+            with patch("jaguartv_postmatch.task1._api_football_logos", return_value={}):
+                loaded = load_task1_fixtures(image_db, date(2026, 9, 3))
+            self.assertEqual(len(loaded), 1)
+            self.assertTrue(loaded[0].home_crest.endswith("Nautico.png"))
+            self.assertTrue(loaded[0].away_crest.endswith("Botafogo-SP.png"))
 
     def test_agent_reach_exa_output_is_stored_with_provenance(self) -> None:
         records = parse_exa_output(

@@ -45,6 +45,9 @@ These rules apply to every task and automation in this repository.
 - Prefer verified real players who participated. A virtual player is allowed only when no verified
   participant image is available, and must not be presented as a named real player. The operator
   confirms all player, crest, and kit assets used by the project are authorized.
+- Official team crests are authorized for this project. Resolve them from the full
+  `image2数据库/assets/crests` library first; if a fixture crest is missing, cache the official
+  source logo into the date crest folder instead of skipping the match for licensing reasons.
 - Winner and loser direction must follow the verified score. Never reverse celebration and defeat.
 - Keep faces unobstructed and place score panels below the face-safe region.
 - Use the complete poster as the exact first video frame and cover; never crop poster content.
