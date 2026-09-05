@@ -242,6 +242,8 @@ def _load_from_prematch_runs(
     prematch_root: Path, image2_database: Path, target_date: date
 ) -> list[Task1Fixture]:
     fixtures_by_id: dict[str, Task1Fixture] = {}
+    api_logos: dict[tuple[str, str], tuple[str, str]] | None = None
+    yymmdd = target_date.strftime("%y%m%d")
     for run_dir in _prematch_run_dirs(prematch_root, target_date):
         fixtures_payload = _read_json(run_dir / "phase1" / "selected-fixtures.json")
         if fixtures_payload is None:
@@ -283,8 +285,18 @@ def _load_from_prematch_runs(
                 )
             if not poster or not Path(poster).is_file():
                 continue
-            home_crest = _resolve_crest(image2_database, home)
-            away_crest = _resolve_crest(image2_database, away)
+            pair = (canonical_team(home), canonical_team(away))
+            api_logos = api_logos if api_logos is not None else _api_football_logos(target_date)
+            home_crest = _resolve_crest(image2_database, home) or (
+                _download_crest(api_logos[pair][0], home, image2_database, yymmdd)
+                if pair in api_logos
+                else ""
+            )
+            away_crest = _resolve_crest(image2_database, away) or (
+                _download_crest(api_logos[pair][1], away, image2_database, yymmdd)
+                if pair in api_logos
+                else ""
+            )
             if not home_crest or not Path(home_crest).is_file():
                 continue
             if not away_crest or not Path(away_crest).is_file():

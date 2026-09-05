@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from jaguartv_postmatch.task1 import (
     _load_from_prematch_runs,
@@ -146,6 +147,48 @@ class Task1InputAdapterTests(unittest.TestCase):
                 _load_from_prematch_runs(prematch_root, image2_database, date(2026, 9, 4)),
                 [],
             )
+
+    def test_load_from_prematch_runs_caches_authorized_missing_crests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prematch_root = root / "prematch"
+            image2_database = root / "image2"
+            run_dir = prematch_root / "runs" / "20260905_batch1"
+            poster = _touch(run_dir / "phase3" / "posters" / "poster.png")
+            _write_json(
+                run_dir / "phase1" / "selected-fixtures.json",
+                {
+                    "fixtures": [
+                        {
+                            "fixture_id": "manual-20260905-man-city-inter",
+                            "competition": "Club World Cup",
+                            "home_team": "Man City",
+                            "away_team": "Inter",
+                            "schedule_date": "2026-09-05",
+                            "kickoff_at_brt": "20:00",
+                            "channels": ["ESPN"],
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                run_dir / "phase3" / "poster-manifest.json",
+                {"items": [{"task_id": "manual-20260905-man-city-inter", "kind": "single", "poster": str(poster)}]},
+            )
+
+            def fake_download(_url: str, team: str, database: Path, yymmdd: str) -> str:
+                path = database / "assets" / "crests" / yymmdd / f"{team}.png"
+                return str(_touch(path).resolve())
+
+            with patch(
+                "jaguartv_postmatch.task1._api_football_logos",
+                return_value={("manchester city", "inter"): ("https://example.test/city.png", "https://example.test/inter.png")},
+            ), patch("jaguartv_postmatch.task1._download_crest", side_effect=fake_download):
+                fixtures = _load_from_prematch_runs(prematch_root, image2_database, date(2026, 9, 5))
+
+            self.assertEqual(len(fixtures), 1)
+            self.assertTrue(Path(fixtures[0].home_crest).is_file())
+            self.assertTrue(Path(fixtures[0].away_crest).is_file())
 
     def test_load_task1_fixtures_falls_back_to_legacy_when_no_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -80,6 +80,16 @@ TEAM_ALIASES = {
     "vasco da gama": "vasco",
     "velez sarsfield": "velez",
     "boca juniors": "boca",
+    # Common Task 1 short names <-> provider display-name bridging.
+    "man city": "manchester city",
+    "manchester city fc": "manchester city",
+    "coventry city": "coventry",
+    "ceara sc": "ceara",
+    "bayer 04 leverkusen": "bayer leverkusen",
+    "1 fc union berlin": "union berlin",
+    "internazionale": "inter",
+    "inter milan": "inter",
+    "fc internazionale milano": "inter",
 }
 
 
