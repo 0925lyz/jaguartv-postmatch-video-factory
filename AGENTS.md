@@ -19,7 +19,7 @@ These rules apply to every task and automation in this repository.
 
 ## Image, video, and voice routing
 
-- Poster generation uses the configured active `gpt-image-2` route first and APIMart Image2 second.
+- Poster generation uses APIMart Image2 first and the active large-model API `gpt-image-2` route only after APIMart fails.
 - Record every provider fallback; never substitute providers silently.
 - The upper-right brand mark must always be the exact Figure 1 JaguarTV logo image. Never let
   Image2, Dreamina, or a compositor redraw, restyle, recolor, replace, morph, or distort it.
@@ -36,7 +36,7 @@ These rules apply to every task and automation in this repository.
 ## Post-match invariants
 
 - Process only fixtures already selected upstream by Task 1.
-- The scheduled daily post-match collection starts at 01:00 Brasília.
+- WorkBuddy owns the automation trigger time; this repository must not prescribe or store a fixed start time.
 - Use API-Football as the primary official post-match score source; keep copa.jarg.top as the
   Task 1/channel/source-page cross-check.
 - Continue only for official `FT`, `AET`, or `PEN` results.
@@ -49,6 +49,9 @@ These rules apply to every task and automation in this repository.
   `image2数据库/assets/crests` library first; if a fixture crest is missing, cache the official
   source logo into the date crest folder instead of skipping the match for licensing reasons.
 - Winner and loser direction must follow the verified score. Never reverse celebration and defeat.
+- Use post-match research as evidence for the text model's Image2 prompt. The poster may use verified
+  goalscorer celebration, a referee showing a red card to the correctly identified offending side,
+  another verified match turning point, or the classic winner/loser reaction. Never invent an event.
 - Keep faces unobstructed and place score panels below the face-safe region.
 - Use the complete poster as the exact first video frame and cover; never crop poster content.
 - Generated video filenames must be Chinese.

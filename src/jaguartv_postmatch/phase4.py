@@ -165,12 +165,22 @@ def _motion_context(entry: dict[str, Any], research: dict[str, Any]) -> str:
         ]
         return "Completed-results summary rows: " + "; ".join(rows)
     result = entry["results"][0]
-    goals = research.get("verified_match_record", {}).get("goals", [])
+    match_record = research.get("verified_match_record", {})
+    goals = match_record.get("goals", [])
+    red_cards = (match_record.get("incidents") or {}).get("red_cards", [])
     scorers = ", ".join(dict.fromkeys(str(goal.get("scorer")) for goal in goals if goal.get("scorer")))
+    dismissals = "; ".join(
+        " ".join(
+            str(card.get(field) or "").strip()
+            for field in ("team", "minute", "text")
+            if str(card.get(field) or "").strip()
+        )
+        for card in red_cards
+    )
     return (
         f"Completed match: {result['home_team']} {result['home_score']}-{result['away_score']} {result['away_team']}; "
         f"{result['competition']}; official state {result['result_status']}; verified scorers: {scorers or 'not used visually'}; "
-        "verified red cards: none. Preserve the verified participating-player likenesses already present in the poster; do not replace, relabel, or add a player."
+        f"verified red cards: {dismissals or 'none'}. Preserve the verified participating-player likenesses already present in the poster; do not replace, relabel, or add a player."
     )
 
 

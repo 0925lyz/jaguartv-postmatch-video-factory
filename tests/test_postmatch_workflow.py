@@ -14,8 +14,21 @@ from jaguartv_postmatch.research import (
     is_match_specific_social_record,
     parse_exa_output,
 )
-from jaguartv_postmatch.phase3 import FIXED_LOGO_POLICY, match_visual_direction
-from jaguartv_postmatch.phase4 import SINGLE_HOOK_ACTION_POLICY, VIDEO_ASSEMBLY_POLICY, video_filenames
+from jaguartv_postmatch.phase3 import (
+    APIMART_BASE_URL,
+    CRS_BASE_URL,
+    FIXED_LOGO_POLICY,
+    PosterTask,
+    _build_model_brief,
+    generate_image2,
+    match_visual_direction,
+)
+from jaguartv_postmatch.phase4 import (
+    SINGLE_HOOK_ACTION_POLICY,
+    VIDEO_ASSEMBLY_POLICY,
+    _motion_context,
+    video_filenames,
+)
 from jaguartv_postmatch.voice import cta_voice_filename
 from jaguartv_postmatch.phase5 import _artifact_revision
 from jaguartv_postmatch.store import WorkflowStore
@@ -244,6 +257,97 @@ Verified match-specific summary.
                 record,
                 {"winner_team": "CORINTHIANS", "loser_team": "SANTOS"},
             )
+
+    def test_prompt_brief_carries_verified_goal_and_red_card_evidence(self) -> None:
+        record = {
+            "result": {
+                "task1_fixture_id": "corinthians_santos_260830",
+                "home_team": "CORINTHIANS",
+                "away_team": "SANTOS",
+                "home_score": 0,
+                "away_score": 1,
+                "competition": "BRASILEIRAO",
+                "official_match_date": "2026-08-30",
+                "result_status": "FT",
+                "channels": ["PREMIERE"],
+            },
+            "research": {
+                "verified_match_record": {
+                    "participants": [],
+                    "goals": [{"team": "SANTOS", "scorer": "Guilherme", "minute": "74'"}],
+                    "incidents": {
+                        "red_cards": [{"team": "CORINTHIANS", "minute": "81'", "text": "Verified dismissal"}],
+                        "penalties": [],
+                        "var": [],
+                        "injuries": [],
+                        "important_substitutions": [],
+                        "serious_fouls": [],
+                    },
+                },
+                "discussion_topics": ["Santos controlled the closing minutes."],
+                "post_match_report_summaries": ["Guilherme scored the winner."],
+                "source_records": [
+                    {"use_for_facts": True, "summary": "Official match report confirms the red card."},
+                    {"use_for_facts": False, "summary": "Unverified social claim."},
+                ],
+            },
+        }
+        match = _build_model_brief([record], date(2026, 8, 30), {})["matches"][0]
+        self.assertEqual(match["verified_events"]["goals"][0]["scorer"], "Guilherme")
+        self.assertEqual(match["verified_events"]["red_cards"][0]["team"], "CORINTHIANS")
+        self.assertIn("verified-goalscorer-celebration", match["allowed_poster_concepts"])
+        self.assertIn("verified-red-card-scene", match["allowed_poster_concepts"])
+        self.assertNotIn("Unverified social claim.", match["verified_research_summaries"])
+
+    def test_image2_uses_apimart_before_active_api(self) -> None:
+        task = PosterTask("match", "single", "prompt", "poster.png", [], "style")
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "jaguartv_postmatch.phase3.env_or_keychain", return_value="apimart-key"
+        ), patch("jaguartv_postmatch.phase3._call_image_endpoint", return_value=[]) as call:
+            provider, _ = generate_image2(task, Path(directory) / "raw.png", 3)
+        self.assertEqual(provider, "apimart")
+        self.assertEqual(call.call_args.args[0], APIMART_BASE_URL)
+
+    def test_image2_falls_back_to_active_api_after_apimart_failure(self) -> None:
+        task = PosterTask("match", "single", "prompt", "poster.png", [], "style")
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "jaguartv_postmatch.phase3.env_or_keychain", return_value="apimart-key"
+        ), patch(
+            "jaguartv_postmatch.phase3._load_primary_key", return_value="active-key"
+        ), patch(
+            "jaguartv_postmatch.phase3._call_image_endpoint",
+            side_effect=[RuntimeError("APIMart unavailable"), []],
+        ) as call:
+            provider, attempts = generate_image2(task, Path(directory) / "raw.png", 3)
+        self.assertEqual(provider, "active-large-model-api")
+        self.assertEqual([item.args[0] for item in call.call_args_list], [APIMART_BASE_URL, CRS_BASE_URL])
+        self.assertEqual(attempts[0]["provider"], "apimart")
+        self.assertFalse(attempts[0]["ok"])
+
+    def test_motion_context_preserves_verified_red_card_side(self) -> None:
+        entry = {
+            "kind": "single",
+            "results": [{
+                "home_team": "CORINTHIANS",
+                "away_team": "SANTOS",
+                "home_score": 0,
+                "away_score": 1,
+                "competition": "BRASILEIRAO",
+                "result_status": "FT",
+            }],
+        }
+        research = {
+            "verified_match_record": {
+                "goals": [],
+                "incidents": {
+                    "red_cards": [{"team": "CORINTHIANS", "minute": "81'", "text": "Dismissal"}]
+                },
+            }
+        }
+        context = _motion_context(entry, research)
+        self.assertIn("CORINTHIANS", context)
+        self.assertIn("81'", context)
+        self.assertNotIn("red cards: none", context)
 
     def test_server_artifact_revision_is_stable_and_content_addressed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

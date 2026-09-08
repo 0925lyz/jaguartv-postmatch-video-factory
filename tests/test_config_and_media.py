@@ -10,7 +10,7 @@ from jaguartv_postmatch.media_library import (
     discover_operation_clips,
     discover_postmatch_posters,
 )
-from jaguartv_postmatch.pipeline import load_config
+from jaguartv_postmatch.pipeline import load_config, preflight
 from jaguartv_postmatch.util import codex_model_args, executable_path
 
 
@@ -65,6 +65,26 @@ def test_config_rejects_wrong_server_label(tmp_path: Path) -> None:
     path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(ValueError, match="赛后比分"):
         load_config(path)
+
+
+def test_preflight_reports_apimart_primary_and_active_api_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = {
+        key: str(tmp_path)
+        for key in (
+            "collector_root", "system_prompts_and_models", "jaguartv_v7_pack",
+            "image2_database", "figure_1", "channel_icons", "pending_review_uploader",
+            "runtime_root",
+        )
+    }
+    config["result_sources"] = {"api_football_required": False}
+    monkeypatch.setattr("jaguartv_postmatch.pipeline._credential_available", lambda name: name == "APIMART_API_KEY")
+    monkeypatch.setattr("jaguartv_postmatch.pipeline._research_connectivity", lambda: {})
+    report = preflight(config)
+    assert report["checks"]["image2_primary"]["provider"] == "apimart"
+    assert report["checks"]["image2_fallback"]["provider"] == "active-large-model-api"
+    assert report["checks"]["image2_route"]["available"] is True
 
 
 def test_executable_path_falls_back_to_local_bin(

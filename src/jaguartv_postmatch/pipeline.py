@@ -155,13 +155,18 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
         "text_model": (config.get("reasoning") or {}).get("primary_model", "current-task"),
     }
     checks["image2_primary"] = {
+        "available": _credential_available("APIMART_API_KEY"),
+        "model": "gpt-image-2",
+        "provider": "apimart",
+    }
+    checks["image2_fallback"] = {
         "available": (Path.home() / ".codex" / "auth.json").is_file(),
         "model": "gpt-image-2",
         "provider": "active-large-model-api",
     }
-    checks["image2_apimart"] = {
-        "available": _credential_available("APIMART_API_KEY"),
-        "provider": "secondary-only",
+    checks["image2_route"] = {
+        "available": checks["image2_primary"]["available"] or checks["image2_fallback"]["available"],
+        "order": ["apimart", "active-large-model-api"],
     }
     checks["task1_store"] = {
         "available": (_path(config, "collector_root") / ".runtime/retention/fixtures.db").is_file()
@@ -173,7 +178,7 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
         "endpoint": result_sources.get("api_football_endpoint", "https://v3.football.api-sports.io/fixtures"),
     }
     missing = [name for name, check in checks.items() if not check.get("available")]
-    optional = {"image2_apimart"}
+    optional = {"image2_primary", "image2_fallback"}
     if not (config.get("result_sources") or {}).get("api_football_required", False):
         optional.add("api_football")
     return {

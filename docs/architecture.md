@@ -11,8 +11,8 @@ selection, kickoff time, channel identity, and stable fixture IDs. Task 3 never 
 |---|---|---|---|
 | 0 | Local config and integrations | Preflight report | Every required dependency exists |
 | 1 | Task 1 fixtures plus API-Football official results | Versioned result records | Status is FT, AET, or PEN |
-| 2 | One completed match | Evidence and participant records | Match-specific sources only |
-| 3 | Verified result and research | Image2 prompt, 4:5 poster, QA | Score, winner, player, logo, face safety |
+| 2 | One completed match | Evidence, event, and participant records for poster ideation | Match-specific sources only |
+| 3 | Verified result and research | Text-model Image2 prompt, 4:5 poster, QA | Event support, score, winner, player, logo, face safety |
 | 4 | Validated poster plus existing V7 inventory | Generated 3-4 second poster hook, 12-second stitched video, cover, manifests | Only hook is generated; later segments are inventory |
 | 5 | Validated package | Pending Review record | Exact label 赛后比分; idempotent upload |
 
@@ -22,7 +22,7 @@ revision and regenerates unpublished artifacts without creating a second logical
 ## Reused resources
 
 - `tomorrow-fixtures-automation`: browser collector and Task 1 fixture database.
-- `API-Football`: primary post-match result source at the 01:00 Brasília daily run.
+- `API-Football`: primary post-match result source whenever WorkBuddy invokes the workflow.
 - `image2数据库`: current player, crest, kit, channel, prompt, and style inventory.
 - `system-prompts-and-models-of-ai-tools`: configured prompt routing for the current task model.
 - `jaguartv-v7-pack`: operation clips, CTA, music, voice inventory, and video compositor.
@@ -30,6 +30,12 @@ revision and regenerates unpublished artifacts without creating a second logical
 
 All are configured by local absolute paths and remain external to this repository. This avoids
 duplicating credentials, browser profiles, large licensed assets, or another repository's history.
+WorkBuddy owns scheduling. This repository exposes execution scripts but stores no fixed trigger time.
+
+Phase 3 first sends the verified Phase 2 evidence to the current task text model. That model writes
+one complete English Image2 prompt per match and may select a verified goalscorer celebration,
+correctly mapped red-card scene, another supported turning point, or result-reaction composition.
+APIMart Image2 is attempted first; the active large-model API `gpt-image-2` route is the recorded fallback.
 
 ## Video assembly rule
 

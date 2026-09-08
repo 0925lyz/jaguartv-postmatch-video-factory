@@ -25,6 +25,7 @@ RAW_W, RAW_H = 1280, 1024
 FIXED_LOGO_POLICY = "use only the exact Figure 1 JaguarTV logo asset in the upper-right; never redesign, restyle, regenerate, replace, or distort it"
 CRS_BASE_URL = "https://crs.whynotm.abrdns.com"
 APIMART_BASE_URL = "https://api.apimart.ai/v1"
+PROMPT_POLICY_VERSION = "postmatch-evidence-concepts-v2"
 
 CHINESE_TEAMS = {
     "CHELSEA": "切尔西",
@@ -336,6 +337,32 @@ def _goal_summary(research: dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "No detailed goal event was available beyond the verified final score."
 
 
+def _verified_events(research: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    match_record = research.get("verified_match_record", {})
+    incidents = match_record.get("incidents", {})
+    return {
+        "goals": match_record.get("goals", []),
+        **{
+            name: incidents.get(name, [])
+            for name in (
+                "red_cards", "penalties", "var", "injuries",
+                "important_substitutions", "serious_fouls",
+            )
+        },
+    }
+
+
+def _allowed_poster_concepts(events: dict[str, list[dict[str, Any]]], decisive: bool) -> list[str]:
+    concepts = ["verified-winner-loser-reaction" if decisive else "balanced-draw-reaction"]
+    if events["goals"]:
+        concepts.append("verified-goalscorer-celebration")
+    if events["red_cards"]:
+        concepts.append("verified-red-card-scene")
+    if any(events[name] for name in ("penalties", "var", "important_substitutions", "serious_fouls")):
+        concepts.append("verified-match-turning-point")
+    return concepts
+
+
 def _build_model_brief(
     records: list[dict[str, Any]], target_date: date, visual_overrides: dict[str, Any]
 ) -> dict[str, Any]:
@@ -343,7 +370,13 @@ def _build_model_brief(
     for item in records:
         result = item["result"]
         research = item["research"]
-        red_cards = research.get("verified_match_record", {}).get("red_cards", [])
+        events = _verified_events(research)
+        verified_summaries = [
+            str(source.get("summary") or "").strip()
+            for source in research.get("source_records", [])
+            if source.get("use_for_facts") and str(source.get("summary") or "").strip()
+        ]
+        decisive = int(result["home_score"]) != int(result["away_score"])
         matches.append(
             {
                 "id": result["task1_fixture_id"],
@@ -354,7 +387,9 @@ def _build_model_brief(
                 "date": result["official_match_date"],
                 "status": result["result_status"],
                 "goals": _goal_summary(research),
-                "red_card_count": len(red_cards),
+                "verified_events": events,
+                "verified_research_summaries": verified_summaries,
+                "allowed_poster_concepts": _allowed_poster_concepts(events, decisive),
                 "identity_mode": research.get("poster_identity_mode", "virtual-hardman-player"),
                 "visual_direction": match_visual_direction(
                     item, visual_overrides.get(result["task1_fixture_id"])
@@ -458,14 +493,26 @@ def generate_prompts_with_text_model(
     brief_path = phase3_dir / "prompt-brief.json"
     schema_path = phase3_dir / "prompt-output.schema.json"
     output_path = phase3_dir / "text-model-prompt-catalog.json"
+    fingerprint_path = phase3_dir / "prompt-catalog.sha256"
     _write_json(brief_path, brief)
     _write_json(schema_path, PROMPT_SCHEMA)
 
     expected_ids = [item["result"]["task1_fixture_id"] for item in records] + ["summary_01", "summary_02"]
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"policy": PROMPT_POLICY_VERSION, "model": primary_model, "brief": brief},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
     # Reuse an existing valid catalog instead of re-running codex (expensive + slow,
-    # usually ~20+ min). Only regenerate when no usable catalog is present.
-    existing = _load_validated_catalog(output_path, expected_ids)
+    # usually ~20+ min). Research or policy changes invalidate the fingerprint.
+    existing = (
+        _load_validated_catalog(output_path, expected_ids)
+        if fingerprint_path.is_file() and fingerprint_path.read_text(encoding="utf-8").strip() == fingerprint
+        else None
+    )
     if existing is not None:
         existing.setdefault("model", primary_model)
         return existing, existing["model"]
@@ -481,8 +528,10 @@ Hard requirements for every prompt:
 - Prefer recognizable, photorealistic likenesses of the verified players supplied in each match's visual_direction. Every named player must have actually participated for the stated team. If no verified real-player information is available, use an anonymous fictional hardman footballer in the correct current team kit colours; all player, crest, and kit assets are operator-authorized for this project.
 - Use the verified current-season team kit design and colors. Do not generate readable sponsors, fake badges, fake crests, names, or numbers; exact official crests are composited later.
 - Keep every head, face, hairline, and eyes fully unobstructed in the upper side portrait zones. Reserve the upper-right for the exact Figure 1 JaguarTV logo asset only; never draw, invent, stylize, or change the logo. Reserve the central-lower band beginning below y=760/2560 for the score panel, crests, and team names; no face may touch that band.
-- Use only match-supported action. There are no red cards in this batch, so no red-card scene is allowed. No invented injury, confrontation, foul, trophy, or celebration.
-- Map home to the left and away to the right without exception. For a decisive result, the verified winning team/player must celebrate and the verified losing team/player must look disappointed. Never reverse winner and loser. For a draw, use balanced restrained tension.
+- Treat each match's verified_events, verified_research_summaries, and allowed_poster_concepts as the only evidence available for its visual story. Choose one clear leading concept from that match's allowed_poster_concepts; the batch does not have to use one repeated winner-versus-loser template.
+- A verified goalscorer celebration is allowed only when that named scorer appears in verified_events.goals. A referee red-card scene is allowed only when verified_events.red_cards identifies the dismissed player or offending team; map the referee's card to that exact side. Other event-led scenes must be directly supported by the supplied match-specific evidence.
+- Map home to the left and away to the right without exception. Never depict the losing side as the winner. Whenever a decisive-result reaction is shown, the verified winner celebrates and the verified loser is disappointed. For a draw, use balanced restrained tension.
+- Do not invent a red card, injury, confrontation, foul, goal, trophy, scorer, celebration, or turning point that is absent from the supplied evidence.
 - Include explicit negative constraints and deterministic overlay safe zones.
 - summary_01 and summary_02 are results grids: no players; clean aligned row bands; left area reserved for kickoff time and channel icons; middle reserved for home crest/name, 'vs', away name/crest and final score; top center reserved for the pt-BR date; upper-right reserved for Figure 1.
 - Exactly one single-match poster, selected deterministically as the fourth single-match ID, must use a controlled alternative editorial collage style. The other singles use varied premium broadcast styles.
@@ -532,6 +581,7 @@ Validated fact brief follows. Do not alter any score, team, competition, date, s
         if len(item["prompt"]) < 700 or "4:5" not in item["prompt"] or "readable text" not in lowered:
             raise RuntimeError(f"Primary model produced an incomplete Image2 prompt for {item['id']}")
     catalog["model"] = model
+    fingerprint_path.write_text(fingerprint + "\n", encoding="utf-8")
     return catalog, model
 
 
@@ -555,11 +605,11 @@ def _make_tasks(
         visual = match_visual_direction(record, visual_overrides.get(result["task1_fixture_id"]))
         if visual["outcome"] == "decisive":
             visual_fields = f"""
-- Mandatory visual outcome mapping: {visual['winner_team']} is the WINNER on the {visual['winner_side']} and must show {visual['winner_emotion']}.
-- Mandatory losing-side mapping: {visual['loser_team']} is the LOSER on the {visual['loser_side']} and must show {visual['loser_emotion']}.
+- Verified outcome mapping: {visual['winner_team']} is the WINNER on the {visual['winner_side']}; {visual['loser_team']} is the LOSER on the {visual['loser_side']}.
+- If the selected concept shows the result reaction, the winner must show {visual['winner_emotion']} and the loser must show {visual['loser_emotion']}.
 - Featured winning player: {visual.get('winner_player', 'a verified participating player')}.
 - Featured losing player: {visual.get('loser_player', 'a verified participating player')}.
-- Never reverse these emotions, teams, players, sides, or current-season kits.
+- An evidence-led goalscorer, red-card, penalty, VAR, substitution, or serious-foul composition may replace the two-player result-reaction layout. Never reverse the verified outcome, event team, player identity, sides, or current-season kits.
 """.strip()
         else:
             draw_lines = [
@@ -708,26 +758,32 @@ def generate_image2(task: PosterTask, raw_path: Path, max_attempts: int) -> tupl
     if raw_path.is_file():
         try:
             _validate_raw(raw_path)
-            return "active-large-model-api", [{"attempt": 0, "ok": True, "reused_idempotently": True}]
+            return "reused-existing-image2", [{"attempt": 0, "ok": True, "reused_idempotently": True}]
         except Exception:
             raw_path.unlink(missing_ok=True)
-    primary_error = None
     try:
-        return "active-large-model-api", _call_image_endpoint(CRS_BASE_URL, _load_primary_key(), task.prompt, raw_path, max_attempts)
+        apimart_key = env_or_keychain("APIMART_API_KEY")
     except Exception as error:  # noqa: BLE001
-        primary_error = f"{type(error).__name__}: {str(error)[:1000]}"
+        apimart_key = ""
+        apimart_error = f"{type(error).__name__}: credential unavailable"
+    else:
+        apimart_error = "APIMart credential is unavailable"
+    if apimart_key:
+        try:
+            return "apimart", _call_image_endpoint(
+                APIMART_BASE_URL, apimart_key, task.prompt, raw_path, max_attempts
+            )
+        except Exception as error:  # noqa: BLE001
+            apimart_error = f"{type(error).__name__}: {str(error)[:1000]}"
     try:
-        fallback_key = env_or_keychain("APIMART_API_KEY")
-    except Exception:
-        fallback_key = ""
-    if not fallback_key:
-        raise RuntimeError(f"Primary Image2 failed ({primary_error}); APIMart credential is unavailable")
-    try:
-        log = _call_image_endpoint(APIMART_BASE_URL, fallback_key, task.prompt, raw_path, 1)
-        log.insert(0, {"provider": "active-large-model-api", "ok": False, "error": primary_error})
-        return "apimart", log
+        log = _call_image_endpoint(CRS_BASE_URL, _load_primary_key(), task.prompt, raw_path, 1)
+        log.insert(0, {"provider": "apimart", "ok": False, "error": apimart_error})
+        return "active-large-model-api", log
     except Exception as error:  # noqa: BLE001
-        raise RuntimeError(f"Primary Image2 failed ({primary_error}); APIMart failed ({type(error).__name__}: {str(error)[:700]})") from error
+        raise RuntimeError(
+            f"APIMart Image2 failed ({apimart_error}); active large-model API Image2 failed "
+            f"({type(error).__name__}: {str(error)[:700]})"
+        ) from error
 
 
 def _font(size: int, condensed: bool = False) -> ImageFont.FreeTypeFont:
@@ -1030,22 +1086,10 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
     fallback_model = str(reasoning.get("fallback_model") or primary_model)
     model_provider = reasoning.get("model_provider")
     reasoning_effort = str(reasoning.get("reasoning_effort") or "high")
-    catalog_path = phase3_dir / "text-model-prompt-catalog.json"
-    if catalog_path.is_file():
-        catalog = _parse_prompt_catalog(catalog_path.read_text(encoding="utf-8"))
-        cached_model = str(catalog.get("model") or "").strip()
-        # Rebuild stale prompt caches when their recorded model differs from configuration.
-        if not cached_model or cached_model == primary_model:
-            prompt_model = cached_model or primary_model
-        else:
-            catalog_path.unlink(missing_ok=True)
-            catalog, prompt_model = generate_prompts_with_text_model(
-                records, target_date, phase3_dir, visual_overrides, primary_model, fallback_model, model_provider
-            )
-    else:
-        catalog, prompt_model = generate_prompts_with_text_model(
-            records, target_date, phase3_dir, visual_overrides, primary_model, fallback_model, model_provider
-        )
+    catalog, prompt_model = generate_prompts_with_text_model(
+        records, target_date, phase3_dir, visual_overrides,
+        primary_model, fallback_model, model_provider,
+    )
     tasks = _make_tasks(catalog, records, target_date, visual_overrides)
 
     figure_path = Path(str(config["figure_1"])).resolve()
@@ -1104,7 +1148,7 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
                 "poster_count": len(outputs),
                 "posters": outputs,
                 "failed": failures,
-                "fallback_used": any(item["image2_provider"] != "active-large-model-api" for item in outputs),
+                "fallback_used": any(item["image2_provider"] == "active-large-model-api" for item in outputs),
             },
         )
 
