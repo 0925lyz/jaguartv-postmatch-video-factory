@@ -13,11 +13,15 @@ selection, kickoff time, channel identity, and stable fixture IDs. Task 3 never 
 | 1 | Task 1 fixtures plus API-Football official results | Versioned result records | Status is FT, AET, or PEN |
 | 2 | One completed match | Evidence, event, and participant records for poster ideation | Match-specific sources only |
 | 3 | Verified result and research | Text-model Image2 prompt, 4:5 poster, QA | Event support, score, winner, player, logo, face safety |
-| 4 | Validated poster plus existing V7 inventory | Generated 3-4 second poster hook, 12-second stitched video, cover, manifests | Only hook is generated; later segments are inventory |
+| 4 | Validated poster plus existing V7 inventory | Generated 4-second poster hook, dynamically timed stitched video, cover, manifests | Dreamina then APIMart fallback; inventory clips play in full |
 | 5 | Validated package | Pending Review record | Exact label 赛后比分; idempotent upload |
 
 Result revisions and uploads are content-addressed. A corrected official score updates the current
 revision and regenerates unpublished artifacts without creating a second logical record.
+
+WorkBuddy variants `post1` and `post2` use separate same-date run directories and server identities.
+Their prompt profiles and caption leads differ; Phase 5 blocks upload if matching task IDs reuse a
+poster hash, style label, complete caption, or final-video hash across the two batches.
 
 ## Reused resources
 
@@ -39,9 +43,11 @@ APIMart Image2 is attempted first; the active large-model API `gpt-image-2` rout
 
 ## Video assembly rule
 
-The only generated video segment is the opening poster hook created from the validated poster
-master. Downloader/search/main-interface segments, CTA, music, and voiceover are never generated
-per match; they are selected from existing authorized inventory and stitched into the final video.
+The only generated video segment is the four-second opening poster hook created from the validated
+poster master. Dreamina/Jimeng VIP Seedance 2.0 Fast 720p is primary; APIMart
+`wan2.6-i2v-flash` at 720p for four seconds is the recorded fallback. Downloader/search/main-interface
+segments, motion CTA, music, and voiceover are selected from existing authorized inventory. Both
+operation clips and the CTA play in full, so final duration is calculated from actual media durations.
 During that hook, the poster background should animate and the players may show strong score-based
 emotion. The fixed upper-right Figure 1 logo, score, crests, and date must stay unchanged.
 Final video filenames are ordered with a Chinese `01`/`02`/`03` prefix matching caption order.

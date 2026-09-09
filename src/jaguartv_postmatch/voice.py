@@ -25,6 +25,16 @@ DEFAULT_INVENTORY = [
         "voice": "shimmer",
         "text": "Baixe agora! Jaguar Tê Vê, sete dias grátis!",
     },
+    {
+        "id": "onyx-01",
+        "voice": "onyx",
+        "text": "Vem com tudo! Futebol ao vivo é no Jaguar TV!",
+    },
+    {
+        "id": "onyx-02",
+        "voice": "onyx",
+        "text": "Não perde tempo! Baixe agora o app Jaguar TV!",
+    },
 ]
 
 

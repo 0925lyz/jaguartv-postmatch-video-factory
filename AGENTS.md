@@ -23,20 +23,26 @@ These rules apply to every task and automation in this repository.
 - Record every provider fallback; never substitute providers silently.
 - The upper-right brand mark must always be the exact Figure 1 JaguarTV logo image. Never let
   Image2, Dreamina, or a compositor redraw, restyle, recolor, replace, morph, or distort it.
-- Video generation uses only the operator's authenticated Dreamina/Jimeng VIP account and the
-  configured Seedance model.
-- Generate only the opening 3-4 second poster hook. Middle operation clips, CTA, music, and
-  voiceover must be selected from existing authorized inventory and stitched by V7.
+- Video generation uses the operator's authenticated Dreamina/Jimeng VIP Seedance 2.0 Fast 720p
+  route first. If it is unavailable or a generation fails, use APIMart `wan2.6-i2v-flash` at
+  720p for 4 seconds and record the fallback.
+- Generate exactly the opening 4-second poster hook. Both middle operation clips and the motion
+  CTA must be selected from existing authorized inventory and played in full. Final duration is
+  the dynamic sum of those segments, not a fixed 12 seconds.
 - In the generated poster hook, animate the poster background and match emotion: the winning
   player may jump, shout, pump fists, and celebrate intensely; the losing player may pound the
   turf, sigh, bury their head in their hands, or complain toward the referee, teammate, or opponent.
-- Generate a small reusable APIMart `gpt-4o-mini-tts` female CTA inventory (`nova` and `shimmer`)
-  and rotate it with the existing authorized local WAV inventory. Do not generate voices daily.
+- Generate a small reusable APIMart `gpt-4o-mini-tts` CTA inventory with `onyx` energetic male
+  voices plus `nova` / `shimmer` female voices, and rotate it with existing authorized local WAVs.
+  Pair voice rotation to CTA rotation and do not generate voices daily.
 
 ## Post-match invariants
 
 - Process only fixtures already selected upstream by Task 1.
 - WorkBuddy owns the automation trigger time; this repository must not prescribe or store a fixed start time.
+- WorkBuddy batch `赛后1` must invoke `--batch post1`; batch `赛后2` must invoke `--batch post2`.
+  Never omit the batch flag for those automations. Same-date batches use separate run directories,
+  visual profiles, captions, and server workflow identities; Phase 5 rejects cross-batch duplicates.
 - Use API-Football as the primary official post-match score source; keep copa.jarg.top as the
   Task 1/channel/source-page cross-check.
 - Continue only for official `FT`, `AET`, or `PEN` results.
@@ -57,5 +63,7 @@ These rules apply to every task and automation in this repository.
 - Generated video filenames must be Chinese.
 - Prefix generated video filenames in production order with `01`, `02`, `03` and keep captions in
   the same order without numbering inside the public text.
+- Every TikTok and YouTube caption includes `Acesse jaguartvbrasil.com/baixar-app para baixar.`.
+  TikTok uses exactly five hashtags and includes `#jaguartv` and `#iptv`; `#jaguartvbrasil` is optional.
 - Upload only validated artifacts to Pending Review under the exact label `赛后比分`.
 - Stop at the first unavailable required integration and emit a sanitized failure report.

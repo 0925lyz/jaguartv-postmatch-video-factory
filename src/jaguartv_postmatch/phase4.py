@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -12,7 +13,8 @@ from typing import Any
 
 from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
-from .util import codex_model_args, normalize_name, utc_now
+from .credentials import env_or_keychain
+from .util import codex_model_args, normalize_name, postmatch_run_dir, utc_now
 from .util import sanitize_filename_part
 from .voice import prepare_voice_rotation
 
@@ -20,7 +22,12 @@ from .voice import prepare_voice_rotation
 W, H = 1080, 1920
 DEFAULT_REASONING_MODEL = "current-task"
 DEFAULT_REASONING_FALLBACK = "current-task"
-VIDEO_ASSEMBLY_POLICY = "only the opening poster hook is generated; every later segment is assembled from existing authorized inventory"
+VIDEO_ASSEMBLY_POLICY = (
+    "generate exactly the four-second opening poster hook; assemble every later segment from existing "
+    "authorized inventory; play each selected operation and motion CTA clip in full; calculate final duration from "
+    "the actual segment durations"
+)
+DOWNLOAD_SENTENCE = "Acesse jaguartvbrasil.com/baixar-app para baixar."
 SINGLE_HOOK_ACTION_POLICY = (
     "animate the poster background with stadium light, smoke, crowd depth, fabric motion, and score energy; "
     "the winning player may jump, shout, pump fists, and celebrate intensely; "
@@ -78,6 +85,19 @@ def _probe(path: Path) -> dict[str, Any]:
     }
 
 
+def _duration(path: Path) -> float:
+    completed = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+        ],
+        text=True, capture_output=True, timeout=30, check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"ffprobe duration failed for {path.name}: {completed.stderr[-500:]}")
+    return float(completed.stdout.strip())
+
+
 def video_filenames(poster_path: str | Path, source_seconds: int = 4, sequence: str | int | None = None) -> dict[str, str]:
     stem = sanitize_filename_part(Path(poster_path).stem)
     prefix = f"{int(sequence):02d}" if sequence is not None else ""
@@ -87,10 +107,24 @@ def video_filenames(poster_path: str | Path, source_seconds: int = 4, sequence: 
         "poster_stem": stem,
         "sequence": prefix,
         "master": f"{named}_母版_1080x1920.png",
-        "raw_video": f"{named}_即梦动态_{source_seconds}秒.mp4",
-        "hook": f"{named}_动态钩子_3秒.mp4",
-        "final": f"{named}_成片_12秒.mp4",
+        "raw_video": f"{named}_海报动态_{source_seconds}秒.mp4",
+        "hook": f"{named}_动态钩子_{source_seconds}秒.mp4",
+        "final": f"{named}_成片.mp4",
         "cover": f"{named}_封面_1080x1920.jpg",
+    }
+
+
+def _assembly_timing(
+    operation_durations: list[float], cta_duration: float, voice_duration: float
+) -> dict[str, Any]:
+    cta_seconds = max(cta_duration, voice_duration)
+    return {
+        "hook_seconds": 4.0,
+        "operation_seconds": operation_durations,
+        "cta_source_seconds": cta_duration,
+        "voice_seconds": voice_duration,
+        "cta_seconds": cta_seconds,
+        "final_seconds": 4.0 + sum(operation_durations) + cta_seconds,
     }
 
 
@@ -341,11 +375,55 @@ def _poll_all(states: dict[str, dict[str, Any]], max_rounds: int = 120, sleep_se
                 pending.remove(task_id)
             elif status == "fail":
                 reason = str(payload.get("fail_reason") or payload.get("message") or "Dreamina generation failed")[:700]
-                raise RuntimeError(f"Dreamina task failed for {task_id}: {reason}")
+                state["failure"] = reason
+                pending.remove(task_id)
         if not pending:
             return
         time.sleep(sleep_seconds)
-    raise TimeoutError(f"Dreamina tasks did not settle: {sorted(pending)}")
+    for task_id in pending:
+        states[task_id]["failure"] = "Dreamina task timed out"
+
+
+def _generate_apimart_video(
+    config: dict[str, Any], v7: Path, master: Path, prompt: str, output: Path,
+) -> dict[str, Any]:
+    video_config = config.get("video") or {}
+    script = Path(
+        str(video_config.get("apimart_script") or v7 / "scripts" / "generate-apimart-video.mjs")
+    ).expanduser().resolve()
+    if not script.is_file():
+        raise FileNotFoundError(f"APIMart video script is missing: {script}")
+    key = env_or_keychain("APIMART_API_KEY")
+    model = str(video_config.get("fallback_model") or "wan2.6-i2v-flash")
+    resolution = str(video_config.get("fallback_resolution") or "720p")
+    duration = int(video_config.get("fallback_duration") or 4)
+    environment = {
+        **os.environ,
+        "APIMART_API_KEY": key,
+        "APIMART_BASE_URL": str(os.environ.get("APIMART_BASE_URL") or "https://api.apimart.ai/v1"),
+    }
+    completed = subprocess.run(
+        [
+            "node", str(script), "--model", model, "--image", str(master),
+            "--prompt", prompt, "--duration", str(duration), "--resolution", resolution,
+            "--aspect-ratio", "9:16", "--output", str(output),
+        ],
+        text=True, capture_output=True, env=environment, timeout=1200, check=False,
+    )
+    if completed.returncode != 0 or not output.is_file() or output.stat().st_size < 20_000:
+        detail = re.sub(
+            r"(?:sk-|Bearer\s+)[A-Za-z0-9._-]+", "[credential redacted]",
+            completed.stderr or completed.stdout or "APIMart video generation failed",
+        )[-900:]
+        raise RuntimeError(detail)
+    return {
+        "provider": "apimart",
+        "model": model,
+        "resolution": resolution,
+        "duration": duration,
+        "fallback_used": True,
+        "completed_at": utc_now(),
+    }
 
 
 def _make_exact_hook(master: Path, dreamina_video: Path, output: Path) -> None:
@@ -353,19 +431,65 @@ def _make_exact_hook(master: Path, dreamina_video: Path, output: Path) -> None:
         [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-loop", "1", "-framerate", "30", "-t", "0.10", "-i", str(master),
-            "-loop", "1", "-framerate", "30", "-t", "3.00", "-i", str(master),
+            "-loop", "1", "-framerate", "30", "-t", "4.00", "-i", str(master),
             "-i", str(dreamina_video),
             "-filter_complex",
             "[0:v]scale=1080:1920,setsar=1,trim=duration=0.10,setpts=PTS-STARTPTS[first];"
-            "[1:v]scale=1080:1920,setsar=1,crop=1080:1350:0:285,trim=duration=2.90,setpts=PTS-STARTPTS[poster];"
-            "[2:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,gblur=sigma=34,trim=start=0.10:end=3.00,setpts=PTS-STARTPTS[ambient];"
+            "[1:v]scale=1080:1920,setsar=1,crop=1080:1350:0:285,trim=duration=3.90,setpts=PTS-STARTPTS[poster];"
+            "[2:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,gblur=sigma=34,trim=start=0.10:end=4.00,setpts=PTS-STARTPTS[ambient];"
             "[ambient][poster]overlay=0:285:shortest=1[exact];"
             "[first][exact]concat=n=2:v=1:a=0[out]",
-            "-map", "[out]", "-t", "3", "-r", "30", "-c:v", "libx264", "-preset", "medium",
+            "-map", "[out]", "-t", "4", "-r", "30", "-c:v", "libx264", "-preset", "medium",
             "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
         ],
         capture_output=True, timeout=240, check=True,
     )
+
+
+def _compose_full_inventory(
+    hook: Path, modules: list[Path], cta: Path, music: Path, voice: Path, output: Path,
+) -> dict[str, Any]:
+    operation_durations = [_duration(path) for path in modules]
+    cta_source_duration = _duration(cta)
+    voice_duration = _duration(voice)
+    timing = _assembly_timing(operation_durations, cta_source_duration, voice_duration)
+    visuals = [hook, *modules, cta]
+    visual_durations = [4.0, *operation_durations, timing["cta_seconds"]]
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    for path in visuals:
+        command.extend(["-i", str(path)])
+    music_index = len(visuals)
+    voice_index = music_index + 1
+    command.extend(["-stream_loop", "-1", "-i", str(music), "-i", str(voice)])
+    filters = []
+    video_labels = []
+    for index, (duration, source_duration) in enumerate(zip(visual_durations, [4.0, *operation_durations, cta_source_duration])):
+        extension = max(0.0, duration - source_duration)
+        pad = f",tpad=stop_mode=clone:stop_duration={extension:.6f}" if extension > 0.01 else ""
+        filters.append(
+            f"[{index}:v]scale=1080:1920:force_original_aspect_ratio=decrease,"
+            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+            f"{pad},trim=duration={duration:.6f},setpts=PTS-STARTPTS[v{index}]"
+        )
+        video_labels.append(f"[v{index}]")
+    filters.append(f"{''.join(video_labels)}concat=n={len(visuals)}:v=1:a=0[v]")
+    cta_start = 4.0 + sum(operation_durations)
+    total = timing["final_seconds"]
+    filters.extend([
+        f"[{music_index}:a]atrim=0:{total:.6f},asetpts=N/SR/TB,volume='if(gte(t,{cta_start:.6f}),0.12,0.3)':eval=frame[bg]",
+        f"[{voice_index}:a]atrim=0:{voice_duration:.6f},asetpts=N/SR/TB,adelay={round(cta_start * 1000)}:all=1,volume=1.15[vo]",
+        "[bg][vo]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=7,alimiter=limit=0.8:attack=5:release=50[a]",
+    ])
+    command.extend([
+        "-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
+        "-t", f"{total:.6f}", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-b:a", "192k",
+        "-movflags", "+faststart", str(output),
+    ])
+    completed = subprocess.run(command, text=True, capture_output=True, timeout=900, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(f"ffmpeg full-duration compose failed: {(completed.stderr or completed.stdout)[-900:]}")
+    return timing
 
 
 def _extract_frame(video: Path, at: float, output: Path) -> None:
@@ -389,7 +513,9 @@ def _poster_region_rms(a: Path, b: Path) -> float:
     return math.sqrt(sum(value * value for value in stat.rms) / len(stat.rms))
 
 
-def _caption_for_single(result: dict[str, Any], research: dict[str, Any]) -> dict[str, Any]:
+def _caption_for_single(
+    result: dict[str, Any], research: dict[str, Any], batch_id: str | None = None,
+) -> dict[str, Any]:
     goals = research.get("verified_match_record", {}).get("goals", [])
     goal_parts = []
     for goal in goals:
@@ -406,22 +532,24 @@ def _caption_for_single(result: dict[str, Any], research: dict[str, Any]) -> dic
     months = ("janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro")
     date_text = f"{parsed_date.day} de {months[parsed_date.month - 1]} de {parsed_date.year}"
     tags = _caption_tags(result["home_team"], result["away_team"], result["competition"])
+    lead_tk = "APITO FINAL" if batch_id == "post2" else "PLACAR FINAL"
+    lead_yt = "No apito final" if batch_id == "post2" else "Resultado oficial"
     return {
         "match": match,
         "task1_fixture_id": result["task1_fixture_id"],
         "caption_tk": (
-            f"PLACAR FINAL: {match}. "
+            f"{lead_tk}: {match}. "
             f"{('Gols: ' + goal_text + '. ') if goal_text else ''}"
-            "Vem ver ao vivo no Jaguar TV 📺 7 dias grátis no jaguartvbrasil.com para Android e TV Box."
+            f"{DOWNLOAD_SENTENCE}"
         ),
         "tags_tk": tags,
         "caption_yt": (
-            f"Resultado oficial: {match}, por {result['competition']}, em {date_text}. "
+            f"{lead_yt}: {match}, por {result['competition']}, em {date_text}. "
             f"A partida começou às {result['original_kickoff_time']} no Horário de Brasília. "
             f"{('Gols: ' + goal_text + '. ') if goal_text else ''}"
-            "Baixa no jaguartvbrasil.com 📲 e assista TV ao vivo no Jaguar TV."
+            f"{DOWNLOAD_SENTENCE}"
         ),
-        "tags_yt": [tag.removeprefix("#") for tag in tags],
+        "tags_yt": tags,
     }
 
 
@@ -431,21 +559,27 @@ def _caption_tags(home: str, away: str, competition: str) -> list[str]:
         return f"#{slug[:28] or 'futebol'}"
 
     league = tag(competition.split("·", 1)[0])
-    return [tag(home), tag(away), league, "#placarfinal", "#jaguartvbrasil"]
+    return [tag(home), tag(away), league, "#jaguartv", "#iptv"]
 
 
-def _captions(entries: list[dict[str, Any]], research_by_id: dict[str, dict[str, Any]], target_date: date) -> dict[str, Any]:
+def _captions(
+    entries: list[dict[str, Any]], research_by_id: dict[str, dict[str, Any]], target_date: date,
+    batch_id: str | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": "jaguartv-postmatch-captions-v1",
         "language": "pt-BR",
         "timezone_label": "Horário de Brasília",
+        "batch_id": batch_id,
         "generated_at": utc_now(),
         "items": {},
     }
     for entry in sorted(entries, key=lambda item: str(item.get("sequence") or "")):
         if entry["kind"] == "single":
             result = entry["results"][0]
-            payload["items"][entry["task_id"]] = _caption_for_single(result, research_by_id[result["task1_fixture_id"]])
+            payload["items"][entry["task_id"]] = _caption_for_single(
+                result, research_by_id[result["task1_fixture_id"]], batch_id
+            )
         else:
             score_lines = [f"{r['home_team'].title()} {r['home_score']} x {r['away_score']} {r['away_team'].title()}" for r in entry["results"]]
             joined = "; ".join(score_lines)
@@ -454,15 +588,15 @@ def _captions(entries: list[dict[str, Any]], research_by_id: dict[str, dict[str,
             payload["items"][entry["task_id"]] = {
                 "summary": True,
                 "caption_tk": (
-                    f"PLACARES FINAIS de {date_text}: {joined}. "
-                    "Vem ver ao vivo no Jaguar TV 📺 7 dias grátis no jaguartvbrasil.com para Android e TV Box."
+                    f"{'GIRO DE RESULTADOS' if batch_id == 'post2' else 'PLACARES FINAIS'} de {date_text}: {joined}. "
+                    f"{DOWNLOAD_SENTENCE}"
                 ),
-                "tags_tk": ["#placares", "#futebol", "#resultados", "#tvaovivo", "#jaguartvbrasil"],
+                "tags_tk": ["#placares", "#futebol", "#resultados", "#jaguartv", "#iptv"],
                 "caption_yt": (
-                    f"Resumo dos resultados oficiais de {date_text}, no Horário de Brasília: {joined}. "
-                    "Baixa no jaguartvbrasil.com 📲 e assista TV ao vivo no Jaguar TV."
+                    f"{'Confira o giro dos placares' if batch_id == 'post2' else 'Resumo dos resultados oficiais'} de {date_text}, no Horário de Brasília: {joined}. "
+                    f"{DOWNLOAD_SENTENCE}"
                 ),
-                "tags_yt": ["placares", "futebol", "resultados", "tvaovivo", "jaguartvbrasil"],
+                "tags_yt": ["#placares", "#futebol", "#resultados", "#jaguartv", "#iptv"],
             }
     return payload
 
@@ -489,12 +623,14 @@ def _phase4_entries(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, dict
     return entries, research_by_id
 
 
-def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) -> dict[str, Any]:
-    run_dir = factory_root / "runs" / target_date.strftime("%Y%m%d")
+def run_phase4(
+    config: dict[str, Any], target_date: date, factory_root: Path, batch_id: str | None = None,
+) -> dict[str, Any]:
+    run_dir = postmatch_run_dir(factory_root, target_date, batch_id)
     phase4_dir = run_dir / "phase4"
     output_dir = phase4_dir / "video"
     prompt_dir = phase4_dir / "motion-prompts"
-    raw_dir = phase4_dir / "dreamina-raw"
+    raw_dir = phase4_dir / "hook-raw"
     qa_dir = phase4_dir / "qa"
     for directory in (output_dir, prompt_dir, raw_dir, qa_dir):
         directory.mkdir(parents=True, exist_ok=True)
@@ -510,12 +646,11 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
         "main_epg": factory_assets / "02-omni-football-epg-stable-3.0s.mp4",
     }
     cta_dir = factory_assets / "replaceable" / "cta"
-    ctas = sorted((cta_dir / "static-vertical").glob("*.jpg")) + sorted((cta_dir / "motion").glob("*.mp4"))
+    ctas = sorted((cta_dir / "motion").glob("*.mp4"))
     music_dir = factory_assets / "replaceable" / "music"
     music = sorted(music_dir.glob("0*.m4a"))
     voices, voice_rotation_meta = prepare_voice_rotation(config, target_date, factory_root)
-    compose_script = v7 / "scripts" / "compose-video.mjs"
-    required = [*modules.values(), compose_script]
+    required = [*modules.values()]
     if any(not path.is_file() for path in required) or not ctas or not music or not voices:
         missing = [str(path) for path in required if not path.is_file()]
         raise FileNotFoundError(f"Required v7 production assets unavailable: {missing}; CTA={len(ctas)} music={len(music)} voice={len(voices)}")
@@ -524,6 +659,8 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
     model = str(video_config["model"])
     resolution = str(video_config["resolution"])
     source_seconds = int(video_config["hook_seconds"])
+    if source_seconds != 4:
+        raise ValueError("Post-match poster hook must be exactly 4 seconds")
     states: dict[str, dict[str, Any]] = {}
     manifest_items = []
     operation_pairs = [
@@ -565,14 +702,35 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
         raw_video = raw_dir / names["raw_video"]
         submit_record_path = raw_dir / f"{task_id}_submit.json"
         if raw_video.is_file() and _probe(raw_video)["duration"] >= 3.5:
-            submit = json.loads(submit_record_path.read_text(encoding="utf-8")) if submit_record_path.is_file() else {"submit_id": "existing-local-artifact", "reused_idempotently": True}
+            submit = json.loads(submit_record_path.read_text(encoding="utf-8")) if submit_record_path.is_file() else {
+                "provider": "existing-local-artifact", "reused_idempotently": True,
+            }
         else:
-            submit = _submit_dreamina(master, motion["motion_prompt"], model, resolution, source_seconds)
-            _write_json(submit_record_path, {**submit, "task_id": task_id, "model": model, "resolution": resolution, "duration": source_seconds})
-            states[task_id] = {"submit": submit, "download_dir": raw_dir / task_id, "raw_video": raw_video}
+            try:
+                submit = {
+                    **_submit_dreamina(master, motion["motion_prompt"], model, resolution, source_seconds),
+                    "provider": "dreamina-vip", "model": model, "resolution": resolution,
+                    "duration": source_seconds, "fallback_used": False,
+                }
+                states[task_id] = {
+                    "submit": submit, "download_dir": raw_dir / task_id, "raw_video": raw_video,
+                    "master": master, "prompt": motion["motion_prompt"],
+                    "submit_record_path": submit_record_path,
+                }
+            except Exception as dreamina_error:  # noqa: BLE001
+                try:
+                    submit = {
+                        **_generate_apimart_video(config, v7, master, motion["motion_prompt"], raw_video),
+                        "dreamina_error": f"{type(dreamina_error).__name__}: unavailable",
+                    }
+                except Exception as fallback_error:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"Dreamina unavailable ({type(dreamina_error).__name__}); APIMart video fallback failed: {fallback_error}"
+                    ) from fallback_error
+            _write_json(submit_record_path, {**submit, "task_id": task_id})
 
-        if task_id in previous_items:
-            previous = previous_items[task_id]
+        previous = previous_items.get(task_id, {})
+        try:
             cta_path = Path(str(previous["cta"])).resolve()
             cta_index = next(i for i, candidate in enumerate(ctas) if candidate.resolve() == cta_path)
             operation_name = str(previous["interface_operation"])
@@ -580,14 +738,14 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
             second_module = Path(str(previous["middle_segments"][1])).resolve()
             music_path = Path(str(previous["music"])).resolve()
             music_index = next(i for i, candidate in enumerate(music) if candidate.resolve() == music_path)
-            voice_path = Path(str(previous["voice"])).resolve()
-            voice_index = next(i for i, candidate in enumerate(voices) if candidate.resolve() == voice_path)
-        else:
+        except (KeyError, IndexError, StopIteration):
+            previous = {}
+        if not previous:
             cta_index = (cta_start + cta_assignment_count) % len(ctas)
             cta_assignment_count += 1
             operation_name, first_module, second_module = operation_pairs[index % len(operation_pairs)]
             music_index = index % len(music)
-            voice_index = index % len(voices)
+        voice_index = cta_index % len(voices)
         assigned_cta_indexes.append(cta_index)
         cta_path = ctas[cta_index]
         component = {
@@ -605,15 +763,17 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "shot_script": motion["shot_script"],
             "prompt_model": prompt_model,
             "prompt_fallback_used": fallback,
-            "dreamina_model": model,
-            "dreamina_resolution": resolution,
-            "dreamina_source_seconds": source_seconds,
+            "video_provider": submit.get("provider", "dreamina-vip"),
+            "video_model": submit.get("model", model),
+            "video_resolution": submit.get("resolution", resolution),
+            "video_source_seconds": source_seconds,
+            "video_fallback_used": bool(submit.get("fallback_used", False)),
             "video_assembly_policy": VIDEO_ASSEMBLY_POLICY,
             "generated_segments": [
                 {
                     "role": "opening_poster_hook",
                     "source": str(master.resolve()),
-                    "generator": "dreamina-vip/seedance",
+                    "generator": submit.get("provider", "dreamina-vip"),
                     "seconds": source_seconds,
                 }
             ],
@@ -624,9 +784,9 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
                 {"role": "music", "source": str(music[music_index].resolve())},
                 {"role": "voice", "source": str(voices[voice_index].resolve())},
             ],
-            "hook_compositing_mode": "Seedance ambient 9:16 extension with exact deterministic 4:5 poster locked above it",
+            "hook_compositing_mode": "generated ambient 9:16 extension with exact deterministic 4:5 poster locked above it",
             "seed": None,
-            "seed_note": "Dreamina CLI does not expose a seed; no seed was fabricated.",
+            "seed_note": "The selected video provider did not expose a seed; no seed was fabricated.",
             "submit": submit,
             "raw_video": str(raw_video.resolve()),
             "interface_operation": operation_name,
@@ -638,11 +798,11 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "music_index": music_index,
             "voice": str(voices[voice_index].resolve()),
             "voice_index": voice_index,
-            "source_assets": [entry["poster_path"], str(first_module.resolve()), str(second_module.resolve()), str(cta_path.resolve()), str(music[music_index].resolve())],
+            "source_assets": [entry["poster_path"], str(first_module.resolve()), str(second_module.resolve()), str(cta_path.resolve()), str(music[music_index].resolve()), str(voices[voice_index].resolve())],
             "created_at": utc_now(),
         }
         manifest_items.append(component)
-        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
+        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
 
     if assigned_cta_indexes:
         rotation_state = {
@@ -658,6 +818,32 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
 
     if states:
         _poll_all(states)
+        items_by_id = {item["task_id"]: item for item in manifest_items}
+        for task_id, state in states.items():
+            if state["raw_video"].is_file():
+                continue
+            try:
+                submit = {
+                    **_generate_apimart_video(
+                        config, v7, state["master"], state["prompt"], state["raw_video"]
+                    ),
+                    "dreamina_error": str(state.get("failure") or "generation did not produce a file")[:300],
+                }
+            except Exception as fallback_error:  # noqa: BLE001
+                raise RuntimeError(
+                    f"Dreamina generation failed for {task_id}; APIMart video fallback failed: {fallback_error}"
+                ) from fallback_error
+            _write_json(state["submit_record_path"], {**submit, "task_id": task_id})
+            item = items_by_id[task_id]
+            item.update({
+                "submit": submit,
+                "video_provider": submit["provider"],
+                "video_model": submit["model"],
+                "video_resolution": submit["resolution"],
+                "video_fallback_used": True,
+            })
+            item["generated_segments"][0]["generator"] = submit["provider"]
+        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
 
     combinations = set()
     validations = []
@@ -666,22 +852,19 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
         names = video_filenames(item["poster"], source_seconds, item.get("sequence"))
         raw_video = Path(item["raw_video"])
         if not raw_video.is_file():
-            raise FileNotFoundError(f"Dreamina output missing for {task_id}")
+            raise FileNotFoundError(f"Generated poster-hook video is missing for {task_id}")
         hook = output_dir / names["hook"]
         final = output_dir / names["final"]
         cover = output_dir / names["cover"]
         master = Path(item["master"])
         _make_exact_hook(master, raw_video, hook)
         Image.open(master).convert("RGB").save(cover, "JPEG", quality=95, subsampling=0)
-        command = [
-            "node", str(compose_script), "--poster", str(master), "--hook-video", str(hook),
-            "--poster-sec", "3", "--modules", ",".join(item["middle_segments"]),
-            "--cta", item["cta"], "--music", item["music"], "--voice", item["voice"],
-            "--keypad-code", "2252960", "--output", str(final),
-        ]
-        completed = subprocess.run(command, cwd=v7, text=True, capture_output=True, timeout=900, check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"v7 compose-video failed for {task_id}: {(completed.stderr or completed.stdout)[-900:]}")
+        assembly_timing = _compose_full_inventory(
+            hook,
+            [Path(path) for path in item["middle_segments"]],
+            Path(item["cta"]), Path(item["music"]), Path(item["voice"]), final,
+        )
+        item["assembly_timing"] = assembly_timing
 
         first_frame = qa_dir / f"{task_id}_first-frame.png"
         moving_frame = qa_dir / f"{task_id}_moving-frame.png"
@@ -701,9 +884,10 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "master_1080x1920": Image.open(master).size == (W, H),
             "poster_fully_visible": item["master_layout"]["cropped"] is False and item["master_layout"]["poster_box"] == [0, 285, 1080, 1635],
             "hook_probe": hook_probe,
-            "hook_3_seconds": abs(hook_probe["duration"] - 3.0) <= 0.08,
+            "hook_4_seconds": abs(hook_probe["duration"] - 4.0) <= 0.08,
             "final_probe": final_probe,
-            "final_12_seconds": abs(final_probe["duration"] - 12.0) <= 0.08,
+            "expected_final_seconds": assembly_timing["final_seconds"],
+            "final_duration_matches_inventory": abs(final_probe["duration"] - assembly_timing["final_seconds"]) <= 0.12,
             "final_1080x1920": (final_probe["width"], final_probe["height"]) == (W, H),
             "first_frame_rms_vs_master": round(first_rms, 3),
             "first_frame_faithful": first_rms < 18.0,
@@ -721,7 +905,7 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
         }
         qa["passed"] = all(
             qa[key] for key in (
-                "master_1080x1920", "poster_fully_visible", "hook_3_seconds", "final_12_seconds",
+                "master_1080x1920", "poster_fully_visible", "hook_4_seconds", "final_duration_matches_inventory",
                 "final_1080x1920", "first_frame_faithful", "cover_is_complete_poster_master",
                 "first_frame_matches_video_cover", "hook_is_dynamic", "no_duplicate_combination",
                 "poster_facts_stable_at_2s",
@@ -736,13 +920,14 @@ def run_phase4(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "qa": str(qa_path.resolve()), "completed_at": utc_now(),
         })
         validations.append(qa)
-        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
+        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
 
     captions_path = phase4_dir / "captions.json"
-    _write_json(captions_path, _captions(entries, research_by_id, target_date))
+    _write_json(captions_path, _captions(entries, research_by_id, target_date, batch_id))
     return {
         "ok": True,
         "target_date": target_date.isoformat(),
+        "batch_id": batch_id,
         "video_count": len(manifest_items),
         "build_manifest": str((phase4_dir / "build-manifest.json").resolve()),
         "captions": str(captions_path.resolve()),

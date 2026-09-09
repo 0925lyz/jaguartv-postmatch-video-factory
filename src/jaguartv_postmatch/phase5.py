@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 from .credentials import env_or_keychain
-from .util import utc_now
+from .util import postmatch_run_dir, utc_now
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -31,6 +31,69 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _validate_cross_batch_uniqueness(
+    factory_root: Path, target_date: date, batch_id: str | None,
+) -> dict[str, Any]:
+    if batch_id not in {"post1", "post2"}:
+        return {"checked": False, "reason": "legacy run without batch identity"}
+    sibling_id = "post2" if batch_id == "post1" else "post1"
+    current = postmatch_run_dir(factory_root, target_date, batch_id)
+    sibling = postmatch_run_dir(factory_root, target_date, sibling_id)
+    required = (
+        current / "phase3" / "production-manifest.json",
+        current / "phase4" / "build-manifest.json",
+        current / "phase4" / "captions.json",
+        sibling / "phase3" / "production-manifest.json",
+        sibling / "phase4" / "build-manifest.json",
+        sibling / "phase4" / "captions.json",
+    )
+    if not all(path.is_file() for path in required):
+        return {"checked": False, "reason": f"sibling batch {sibling_id} is not complete"}
+
+    current_posters = {
+        item["task_id"]: item
+        for item in json.loads(required[0].read_text(encoding="utf-8"))["posters"]
+    }
+    sibling_posters = {
+        item["task_id"]: item
+        for item in json.loads(required[3].read_text(encoding="utf-8"))["posters"]
+    }
+    current_build = {
+        item["task_id"]: item
+        for item in json.loads(required[1].read_text(encoding="utf-8"))["items"]
+    }
+    sibling_build = {
+        item["task_id"]: item
+        for item in json.loads(required[4].read_text(encoding="utf-8"))["items"]
+    }
+    current_captions = json.loads(required[2].read_text(encoding="utf-8"))["items"]
+    sibling_captions = json.loads(required[5].read_text(encoding="utf-8"))["items"]
+    duplicate_fields: dict[str, list[str]] = {}
+    for task_id in sorted(set(current_posters) & set(sibling_posters)):
+        duplicates = []
+        if current_posters[task_id].get("sha256") == sibling_posters[task_id].get("sha256"):
+            duplicates.append("poster_sha256")
+        if current_posters[task_id].get("style") == sibling_posters[task_id].get("style"):
+            duplicates.append("style")
+        if current_captions.get(task_id) == sibling_captions.get(task_id):
+            duplicates.append("captions")
+        current_video = Path(str(current_build[task_id].get("final") or ""))
+        sibling_video = Path(str(sibling_build[task_id].get("final") or ""))
+        if current_video.is_file() and sibling_video.is_file() and _sha256(current_video) == _sha256(sibling_video):
+            duplicates.append("video_sha256")
+        if duplicates:
+            duplicate_fields[task_id] = duplicates
+    if duplicate_fields:
+        raise RuntimeError(f"cross-batch uniqueness validation failed: {duplicate_fields}")
+    return {
+        "checked": True,
+        "batch_id": batch_id,
+        "compared_with": sibling_id,
+        "common_items": len(set(current_posters) & set(sibling_posters)),
+        "passed": True,
+    }
 
 
 def _relative(path: str | Path, workspace: Path) -> str:
@@ -229,14 +292,18 @@ def _stop_tunnel(process: subprocess.Popen[str]) -> None:
             process.wait(timeout=5)
 
 
-def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) -> dict[str, Any]:
+def run_phase5(
+    config: dict[str, Any], target_date: date, factory_root: Path, batch_id: str | None = None,
+) -> dict[str, Any]:
     workspace = factory_root.parent.resolve()
-    run_dir = factory_root / "runs" / target_date.strftime("%Y%m%d")
+    run_dir = postmatch_run_dir(factory_root, target_date, batch_id)
     phase5_dir = run_dir / "phase5"
     metadata_dir = phase5_dir / "upload-metadata"
     packages_dir = phase5_dir / "packages"
     metadata_dir.mkdir(parents=True, exist_ok=True)
     packages_dir.mkdir(parents=True, exist_ok=True)
+
+    batch_uniqueness = _validate_cross_batch_uniqueness(factory_root, target_date, batch_id)
 
     env_or_keychain("JAGUARTV_DASHBOARD_URL")
     upload_token = env_or_keychain("JAGUARTV_UPLOAD_TOKEN")
@@ -283,8 +350,12 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
         source_paths = [video_path, cover_path, Path(poster["poster_path"]), Path(poster["prompt_path"]), captions_path, build_path]
         source_paths.extend(run_dir / "phase2" / f"{result['task1_fixture_id']}_research.json" for result in match_results)
         revision = _artifact_revision(source_paths)
-        workflow_identity = f"postmatch:{target_date.isoformat()}:{task_id}"
-        server_relative_dir = f"review/postmatch/{target_date.strftime('%Y%m%d')}/{task_id}/{revision[:16]}"
+        if batch_id:
+            workflow_identity = f"postmatch:{target_date.isoformat()}:{batch_id}:{task_id}"
+            server_relative_dir = f"review/postmatch/{target_date.strftime('%Y%m%d')}/{batch_id}/{task_id}/{revision[:16]}"
+        else:
+            workflow_identity = f"postmatch:{target_date.isoformat()}:{task_id}"
+            server_relative_dir = f"review/postmatch/{target_date.strftime('%Y%m%d')}/{task_id}/{revision[:16]}"
         package_dir = packages_dir / f"{task_id}-{revision[:16]}"
         package_dir.mkdir(parents=True, exist_ok=True)
         files = [
@@ -324,6 +395,7 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
             "social_sources": social,
             "metadata": {
                 "workflow": "jaguartv-postmatch-v1",
+                "batch_id": batch_id,
                 "workflow_identity": workflow_identity,
                 "artifact_revision": revision,
                 "label": "赛后比分",
@@ -334,8 +406,11 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
                 "associations": associations,
                 "attachment_contract_required": True,
                 "source_poster_and_cover_uploaded": False,
-                "model_fallback_used": bool(item.get("prompt_fallback_used")),
-                "dreamina_model": item.get("dreamina_model"),
+                "model_fallback_used": bool(item.get("prompt_fallback_used") or item.get("video_fallback_used")),
+                "prompt_model_fallback_used": bool(item.get("prompt_fallback_used")),
+                "video_provider": item.get("video_provider"),
+                "video_model": item.get("video_model"),
+                "video_fallback_used": bool(item.get("video_fallback_used")),
                 "image2_provider": poster.get("image2_provider"),
             },
         }
@@ -446,6 +521,7 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
             {
                 "schema_version": "jaguartv-postmatch-upload-plan-v2",
                 "target_date": target_date.isoformat(),
+                "batch_id": batch_id,
                 "category": "post_match_score",
                 "label": "赛后比分",
                 "drafts": drafts,
@@ -468,6 +544,7 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
         "source_poster_attachment_supported": True,
         "json_attachment_upload_supported": True,
         "safe_to_upload_complete_package": True,
+        "cross_batch_uniqueness": batch_uniqueness,
     }
     _write_json(phase5_dir / "preflight.json", preflight)
     report_path = phase5_dir / "upload-report.json"
@@ -476,6 +553,7 @@ def run_phase5(config: dict[str, Any], target_date: date, factory_root: Path) ->
         {
             "schema_version": "jaguartv-postmatch-upload-report-v1",
             "target_date": target_date.isoformat(),
+            "batch_id": batch_id,
             "label": "赛后比分",
             "status": "PENDING_REVIEW",
             "verified_count": len(upload_results),

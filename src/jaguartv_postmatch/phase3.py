@@ -15,7 +15,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageStat
 
 from .credentials import env_or_keychain
-from .util import canonical_team, codex_model_args, normalize_name, utc_now
+from .util import canonical_team, codex_model_args, normalize_name, postmatch_run_dir, utc_now
 
 
 W, H = 2048, 2560
@@ -26,6 +26,18 @@ FIXED_LOGO_POLICY = "use only the exact Figure 1 JaguarTV logo asset in the uppe
 CRS_BASE_URL = "https://crs.whynotm.abrdns.com"
 APIMART_BASE_URL = "https://api.apimart.ai/v1"
 PROMPT_POLICY_VERSION = "postmatch-evidence-concepts-v2"
+BATCH_STYLE_PROFILES = {
+    "post1": (
+        "Batch post1 / 赛后1: use cinematic stadium realism, deep floodlight perspective, bold asymmetrical "
+        "player scale, atmospheric rain/smoke/confetti, and a strong lower score axis. Do not use torn-paper, "
+        "newspaper, sticker, scrapbook, flat graphic, or editorial collage construction."
+    ),
+    "post2": (
+        "Batch post2 / 赛后2: use premium editorial collage construction with layered cut photography, "
+        "angular panel geometry, print texture, graphic color blocking, and a displaced side score axis. Do not "
+        "use the cinematic floodlit-stadium composition, centered hero symmetry, rain, smoke, or confetti."
+    ),
+}
 
 CHINESE_TEAMS = {
     "CHELSEA": "切尔西",
@@ -488,8 +500,12 @@ def generate_prompts_with_text_model(
     primary_model: str = "current-task",
     fallback_model: str = "current-task",
     model_provider: str | None = None,
+    batch_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     brief = _build_model_brief(records, target_date, visual_overrides)
+    batch_style = BATCH_STYLE_PROFILES.get(str(batch_id or ""), "Use the configured diversified post-match style pool.")
+    brief["batch_id"] = batch_id
+    brief["mandatory_batch_style_profile"] = batch_style
     brief_path = phase3_dir / "prompt-brief.json"
     schema_path = phase3_dir / "prompt-output.schema.json"
     output_path = phase3_dir / "text-model-prompt-catalog.json"
@@ -521,6 +537,8 @@ def generate_prompts_with_text_model(
 Write exactly one complete, standalone English Image2 production prompt for each ID in this exact set: {json.dumps(expected_ids)}.
 
 Hard requirements for every prompt:
+- Batch identity is {batch_id or 'legacy'} and may not be changed. Mandatory visual profile: {batch_style}
+- The matching fixture in the other batch must look substantially different in background, composition, score axis, player scale, lighting, and texture. Team colors alone do not count as a different design.
 - 4:5 portrait, cinematic premium football editorial design, rich non-empty background.
 - This is POST-MATCH content. Never say pre-match, prediction, palpite, odds, or scheduled result.
 - Image2 produces only the visual base. It must generate no readable text, numbers, scores, dates, clocks, team names, crests, logos, sponsors, watermarks, UI, or QR codes. Exact factual overlays are added deterministically later.
@@ -1069,8 +1087,10 @@ def make_contact_sheet(posters: list[Path], output: Path) -> None:
     sheet.save(output, "PNG", optimize=True)
 
 
-def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) -> dict[str, Any]:
-    run_dir = factory_root / "runs" / target_date.strftime("%Y%m%d")
+def run_phase3(
+    config: dict[str, Any], target_date: date, factory_root: Path, batch_id: str | None = None,
+) -> dict[str, Any]:
+    run_dir = postmatch_run_dir(factory_root, target_date, batch_id)
     phase3_dir = run_dir / "phase3"
     prompts_dir = phase3_dir / "prompts"
     raw_dir = phase3_dir / "raw"
@@ -1088,7 +1108,7 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
     reasoning_effort = str(reasoning.get("reasoning_effort") or "high")
     catalog, prompt_model = generate_prompts_with_text_model(
         records, target_date, phase3_dir, visual_overrides,
-        primary_model, fallback_model, model_provider,
+        primary_model, fallback_model, model_provider, batch_id,
     )
     tasks = _make_tasks(catalog, records, target_date, visual_overrides)
 
@@ -1140,6 +1160,8 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
             {
                 "schema_version": "jaguartv-postmatch-phase3-v1",
                 "target_date": target_date.isoformat(),
+                "batch_id": batch_id,
+                "batch_style_profile": BATCH_STYLE_PROFILES.get(str(batch_id or "")),
                 "updated_at": utc_now(),
                 "prompt_model": prompt_model,
                 "prompt_fallback_used": prompt_model != primary_model,
@@ -1163,6 +1185,7 @@ def run_phase3(config: dict[str, Any], target_date: date, factory_root: Path) ->
     return {
         "ok": True,
         "target_date": target_date.isoformat(),
+        "batch_id": batch_id,
         "prompt_model": prompt_model,
         "poster_count": len(outputs),
         "failed_count": len(failures),

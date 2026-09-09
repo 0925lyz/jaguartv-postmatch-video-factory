@@ -87,6 +87,56 @@ def test_preflight_reports_apimart_primary_and_active_api_fallback(
     assert report["checks"]["image2_route"]["available"] is True
 
 
+def test_preflight_reports_dreamina_primary_and_apimart_video_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "generate-apimart-video.mjs"
+    script.write_text("", encoding="utf-8")
+    config = {
+        key: str(tmp_path)
+        for key in (
+            "collector_root", "system_prompts_and_models", "jaguartv_v7_pack",
+            "image2_database", "figure_1", "channel_icons", "pending_review_uploader",
+            "runtime_root",
+        )
+    }
+    config["video"] = {"apimart_script": str(script)}
+    config["result_sources"] = {"api_football_required": False}
+    monkeypatch.setattr("jaguartv_postmatch.pipeline._credential_available", lambda name: name == "APIMART_API_KEY")
+    monkeypatch.setattr("jaguartv_postmatch.pipeline._research_connectivity", lambda: {})
+    monkeypatch.setattr("jaguartv_postmatch.pipeline.shutil.which", lambda name: None if name == "dreamina" else "/bin/true")
+    report = preflight(config)
+    assert report["checks"]["video_primary"]["provider"] == "dreamina-vip"
+    assert report["checks"]["video_fallback"]["model"] == "wan2.6-i2v-flash"
+    assert report["checks"]["video_route"]["available"] is True
+
+
+def test_preflight_allows_research_when_x_is_down_but_exa_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = {
+        key: str(tmp_path)
+        for key in (
+            "collector_root", "system_prompts_and_models", "jaguartv_v7_pack",
+            "image2_database", "figure_1", "channel_icons", "pending_review_uploader",
+            "runtime_root",
+        )
+    }
+    config["result_sources"] = {"api_football_required": False}
+    monkeypatch.setattr("jaguartv_postmatch.pipeline._credential_available", lambda _name: True)
+    monkeypatch.setattr(
+        "jaguartv_postmatch.pipeline._research_connectivity",
+        lambda: {
+            "agent_reach_exa": {"available": True},
+            "agent_reach_x": {"available": False},
+        },
+    )
+    report = preflight(config)
+    assert report["checks"]["research_route"]["available"] is True
+    assert "agent_reach_x" in report["optional_unavailable"]
+    assert "agent_reach_x" not in report["required_missing"]
+
+
 def test_executable_path_falls_back_to_local_bin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -22,7 +22,7 @@ from .research import build_phase2
 from .store import WorkflowStore
 from .task1 import load_task1_fixtures
 from .credentials import env_or_keychain
-from .util import executable_path, tool_environment, utc_now
+from .util import POSTMATCH_BATCH_IDS, executable_path, postmatch_run_dir, tool_environment, utc_now
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -147,7 +147,34 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
     }
     checks["agent_reach"] = {"available": executable_path("agent-reach") is not None}
     checks.update(_research_connectivity())
-    checks["dreamina"] = {"available": shutil.which("dreamina") is not None}
+    checks["research_route"] = {
+        "available": checks["agent_reach"]["available"] and any(
+            checks.get(name, {}).get("available") for name in ("agent_reach_exa", "agent_reach_x")
+        ),
+        "order": ["agent_reach_exa", "agent_reach_x"],
+    }
+    video_config = config.get("video") or {}
+    apimart_video_script = Path(
+        str(
+            video_config.get("apimart_script")
+            or _path(config, "jaguartv_v7_pack") / "scripts" / "generate-apimart-video.mjs"
+        )
+    ).expanduser().resolve()
+    checks["video_primary"] = {
+        "available": shutil.which("dreamina") is not None,
+        "provider": "dreamina-vip",
+        "model": video_config.get("model", "seedance2.0fast_vip"),
+    }
+    checks["video_fallback"] = {
+        "available": _credential_available("APIMART_API_KEY") and apimart_video_script.is_file(),
+        "provider": "apimart",
+        "model": video_config.get("fallback_model", "wan2.6-i2v-flash"),
+        "script": str(apimart_video_script),
+    }
+    checks["video_route"] = {
+        "available": checks["video_primary"]["available"] or checks["video_fallback"]["available"],
+        "order": ["dreamina-vip", "apimart"],
+    }
     checks["ffmpeg"] = {"available": shutil.which("ffmpeg") is not None}
     checks["ffprobe"] = {"available": shutil.which("ffprobe") is not None}
     checks["codex"] = {
@@ -177,8 +204,20 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
         "provider": "primary official post-match result source",
         "endpoint": result_sources.get("api_football_endpoint", "https://v3.football.api-sports.io/fixtures"),
     }
+    for check_name, credential_name in (
+        ("dashboard_url_credential", "JAGUARTV_DASHBOARD_URL"),
+        ("upload_token_credential", "JAGUARTV_UPLOAD_TOKEN"),
+        ("dashboard_token_credential", "JAGUARTV_DASHBOARD_TOKEN"),
+    ):
+        checks[check_name] = {
+            "available": _credential_available(credential_name),
+            "source": "environment-or-macos-keychain",
+        }
     missing = [name for name, check in checks.items() if not check.get("available")]
-    optional = {"image2_primary", "image2_fallback"}
+    optional = {
+        "agent_reach_exa", "agent_reach_x", "image2_primary", "image2_fallback",
+        "video_primary", "video_fallback",
+    }
     if not (config.get("result_sources") or {}).get("api_football_required", False):
         optional.add("api_football")
     return {
@@ -200,14 +239,15 @@ def write_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
-def run_phase1(config: dict[str, Any], target_date: date) -> dict[str, Any]:
+def run_phase1(config: dict[str, Any], target_date: date, batch_id: str | None = None) -> dict[str, Any]:
     runtime = _path(config, "runtime_root")
-    run_dir = FACTORY_ROOT / "runs" / target_date.strftime("%Y%m%d")
+    run_dir = postmatch_run_dir(FACTORY_ROOT, target_date, batch_id)
+    run_identity = target_date.isoformat() + (f":{batch_id}" if batch_id else "")
     lock_path = runtime / "locks" / "postmatch-daily.lock"
     db_path = runtime / "postmatch.sqlite3"
     with ProcessLock(lock_path):
         store = WorkflowStore(db_path)
-        store.begin_run(target_date.isoformat())
+        store.begin_run(run_identity)
         last_artifact = ""
         try:
             fixtures = load_task1_fixtures(_path(config, "image2_database"), target_date)
@@ -219,6 +259,7 @@ def run_phase1(config: dict[str, Any], target_date: date) -> dict[str, Any]:
                 {
                     "schema_version": "jaguartv-task1-link-v1",
                     "target_date": target_date.isoformat(),
+                    "batch_id": batch_id,
                     "fixtures": [fixture.to_dict() for fixture in fixtures],
                 },
             )
@@ -246,6 +287,7 @@ def run_phase1(config: dict[str, Any], target_date: date) -> dict[str, Any]:
                 {
                     "schema_version": "jaguartv-postmatch-results-v1",
                     "target_date": target_date.isoformat(),
+                    "batch_id": batch_id,
                     "generated_at": utc_now(),
                     "completed_count": len(completed),
                     "unfinished_count": len(unfinished),
@@ -256,13 +298,14 @@ def run_phase1(config: dict[str, Any], target_date: date) -> dict[str, Any]:
             )
             last_artifact = str(result_path.resolve())
             store.finish_run(
-                target_date.isoformat(),
+                run_identity,
                 "PHASE1_COMPLETE",
                 last_successful_artifact=last_artifact,
             )
             return {
                 "ok": True,
                 "target_date": target_date.isoformat(),
+                "batch_id": batch_id,
                 "fixtures": len(fixtures),
                 "completed": len(completed),
                 "unfinished": len(unfinished),
@@ -272,7 +315,7 @@ def run_phase1(config: dict[str, Any], target_date: date) -> dict[str, Any]:
             }
         except Exception as error:
             store.finish_run(
-                target_date.isoformat(),
+                run_identity,
                 "FAILED",
                 last_successful_artifact=last_artifact,
                 error={"type": type(error).__name__, "message": str(error)[:500]},
@@ -282,8 +325,8 @@ def run_phase1(config: dict[str, Any], target_date: date) -> dict[str, Any]:
             store.close()
 
 
-def run_phase2(config: dict[str, Any], target_date: date) -> dict[str, Any]:
-    run_dir = FACTORY_ROOT / "runs" / target_date.strftime("%Y%m%d")
+def run_phase2(config: dict[str, Any], target_date: date, batch_id: str | None = None) -> dict[str, Any]:
+    run_dir = postmatch_run_dir(FACTORY_ROOT, target_date, batch_id)
     results_path = run_dir / "phase1" / "results.json"
     if not results_path.is_file():
         raise FileNotFoundError(f"Phase 1 result artifact is missing: {results_path}")
@@ -292,7 +335,7 @@ def run_phase2(config: dict[str, Any], target_date: date) -> dict[str, Any]:
     return {**research, "player_assets": assets}
 
 
-def run_all(config: dict[str, Any], target_date: date) -> dict[str, Any]:
+def run_all(config: dict[str, Any], target_date: date, batch_id: str | None = None) -> dict[str, Any]:
     runtime = _path(config, "runtime_root")
     with ProcessLock(runtime / "locks" / "postmatch-full-workflow.lock"):
         phase1_attempts = []
@@ -302,21 +345,22 @@ def run_all(config: dict[str, Any], target_date: date) -> dict[str, Any]:
         for offset in retry_minutes:
             if offset > previous_offset:
                 time.sleep((offset - previous_offset) * 60)
-            phase1_result = run_phase1(config, target_date)
+            phase1_result = run_phase1(config, target_date, batch_id)
             phase1_attempts.append({"offset_minutes": offset, **phase1_result})
             previous_offset = offset
             if phase1_result["unfinished"] == 0:
                 break
         if phase1_result is None:
             raise RuntimeError("retry policy did not contain an executable Phase 1 attempt")
-        phase2_result = run_phase2(config, target_date)
-        phase3_result = run_phase3(config, target_date, FACTORY_ROOT)
-        phase4_result = run_phase4(config, target_date, FACTORY_ROOT)
-        phase5_result = run_phase5(config, target_date, FACTORY_ROOT)
+        phase2_result = run_phase2(config, target_date, batch_id)
+        phase3_result = run_phase3(config, target_date, FACTORY_ROOT, batch_id)
+        phase4_result = run_phase4(config, target_date, FACTORY_ROOT, batch_id)
+        phase5_result = run_phase5(config, target_date, FACTORY_ROOT, batch_id)
         return {
             "ok": bool(phase5_result["ok"]),
             "status": "COMPLETE" if phase5_result["ok"] else "BLOCKED",
             "target_date": target_date.isoformat(),
+            "batch_id": batch_id,
             "phase1_attempts": phase1_attempts,
             "phase2": phase2_result,
             "phase3": {key: phase3_result[key] for key in ("ok", "poster_count", "manifest")},
@@ -330,6 +374,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("command", choices=("preflight", "phase1", "phase2", "phase3", "phase4", "phase5", "run"))
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--date", type=date.fromisoformat, default=None)
+    parser.add_argument("--batch", choices=sorted(POSTMATCH_BATCH_IDS), default=None)
     return parser.parse_args()
 
 
@@ -342,28 +387,28 @@ def main() -> None:
         raise SystemExit(1 if result["required_missing"] else 0)
     target_date = args.date or previous_brasilia_day()
     if args.command == "phase2":
-        print(json.dumps(run_phase2(config, target_date), ensure_ascii=False, indent=2))
+        print(json.dumps(run_phase2(config, target_date, args.batch), ensure_ascii=False, indent=2))
         return
     if args.command == "phase3":
-        print(json.dumps(run_phase3(config, target_date, FACTORY_ROOT), ensure_ascii=False, indent=2))
+        print(json.dumps(run_phase3(config, target_date, FACTORY_ROOT, args.batch), ensure_ascii=False, indent=2))
         return
     if args.command == "phase4":
-        print(json.dumps(run_phase4(config, target_date, FACTORY_ROOT), ensure_ascii=False, indent=2))
+        print(json.dumps(run_phase4(config, target_date, FACTORY_ROOT, args.batch), ensure_ascii=False, indent=2))
         return
     if args.command == "phase5":
-        result = run_phase5(config, target_date, FACTORY_ROOT)
+        result = run_phase5(config, target_date, FACTORY_ROOT, args.batch)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         raise SystemExit(2 if not result["ok"] else 0)
     if args.command == "run":
         try:
-            result = run_all(config, target_date)
+            result = run_all(config, target_date, args.batch)
         except LockUnavailable as error:
             print(json.dumps({"ok": False, "status": "ALREADY_RUNNING", "error": str(error)}))
             raise SystemExit(75) from error
         print(json.dumps(result, ensure_ascii=False, indent=2))
         raise SystemExit(2 if not result["ok"] else 0)
     try:
-        result = run_phase1(config, target_date)
+        result = run_phase1(config, target_date, args.batch)
     except LockUnavailable as error:
         print(json.dumps({"ok": False, "status": "ALREADY_RUNNING", "error": str(error)}))
         raise SystemExit(75) from error

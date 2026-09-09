@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,15 @@ def tool_environment() -> dict[str, str]:
 
 
 CURRENT_TASK_MODEL_NAMES = {"", "auto", "current", "current-task", "active-runtime", "inherit"}
+POSTMATCH_BATCH_IDS = {"post1", "post2"}
+
+
+def postmatch_run_dir(factory_root: Path, target_date: date, batch_id: str | None = None) -> Path:
+    batch = str(batch_id or "").strip().casefold()
+    if batch and batch not in POSTMATCH_BATCH_IDS:
+        raise ValueError(f"unsupported post-match batch: {batch_id}")
+    suffix = f"_{batch}" if batch else ""
+    return factory_root / "runs" / f"{target_date.strftime('%Y%m%d')}{suffix}"
 
 
 def codex_model_args(model: str | None, provider: str | None = None) -> list[str]:

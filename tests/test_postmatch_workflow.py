@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from datetime import date
@@ -16,6 +17,7 @@ from jaguartv_postmatch.research import (
 )
 from jaguartv_postmatch.phase3 import (
     APIMART_BASE_URL,
+    BATCH_STYLE_PROFILES,
     CRS_BASE_URL,
     FIXED_LOGO_POLICY,
     PosterTask,
@@ -26,15 +28,19 @@ from jaguartv_postmatch.phase3 import (
 from jaguartv_postmatch.phase4 import (
     SINGLE_HOOK_ACTION_POLICY,
     VIDEO_ASSEMBLY_POLICY,
+    _assembly_timing,
+    _caption_for_single,
+    _generate_apimart_video,
     _motion_context,
     video_filenames,
 )
-from jaguartv_postmatch.voice import cta_voice_filename
-from jaguartv_postmatch.phase5 import _artifact_revision
+from jaguartv_postmatch.voice import DEFAULT_INVENTORY, cta_voice_filename
+from jaguartv_postmatch.phase5 import _artifact_revision, _validate_cross_batch_uniqueness
 from jaguartv_postmatch.store import WorkflowStore
 from jaguartv_postmatch.task1 import Task1Fixture
 from jaguartv_postmatch.task1 import load_task1_fixtures
 from jaguartv_postmatch.util import single_poster_filename
+from jaguartv_postmatch.util import postmatch_run_dir
 
 
 def fixture() -> Task1Fixture:
@@ -362,10 +368,114 @@ Verified match-specific summary.
 
     def test_video_files_use_the_validated_chinese_poster_name(self) -> None:
         names = video_filenames("/tmp/科林蒂安-0：1-桑托斯_260830_海报.png", 4, "01")
-        self.assertEqual(names["raw_video"], "01科林蒂安-0：1-桑托斯_260830_海报_即梦动态_4秒.mp4")
-        self.assertEqual(names["hook"], "01科林蒂安-0：1-桑托斯_260830_海报_动态钩子_3秒.mp4")
-        self.assertEqual(names["final"], "01科林蒂安-0：1-桑托斯_260830_海报_成片_12秒.mp4")
+        self.assertEqual(names["raw_video"], "01科林蒂安-0：1-桑托斯_260830_海报_海报动态_4秒.mp4")
+        self.assertEqual(names["hook"], "01科林蒂安-0：1-桑托斯_260830_海报_动态钩子_4秒.mp4")
+        self.assertEqual(names["final"], "01科林蒂安-0：1-桑托斯_260830_海报_成片.mp4")
         self.assertEqual(names["cover"], "01科林蒂安-0：1-桑托斯_260830_海报_封面_1080x1920.jpg")
+
+    def test_assembly_timing_preserves_full_inventory_durations(self) -> None:
+        timing = _assembly_timing([3.0, 4.25], 5.55, 4.62)
+        self.assertEqual(timing["hook_seconds"], 4.0)
+        self.assertEqual(timing["operation_seconds"], [3.0, 4.25])
+        self.assertEqual(timing["cta_seconds"], 5.55)
+        self.assertAlmostEqual(timing["final_seconds"], 16.8)
+
+    def test_same_date_batches_have_separate_runs_styles_and_captions(self) -> None:
+        root = Path("/tmp/factory")
+        target = date(2026, 9, 9)
+        self.assertEqual(postmatch_run_dir(root, target, "post1").name, "20260909_post1")
+        self.assertEqual(postmatch_run_dir(root, target, "post2").name, "20260909_post2")
+        self.assertNotEqual(BATCH_STYLE_PROFILES["post1"], BATCH_STYLE_PROFILES["post2"])
+        result = {
+            "task1_fixture_id": "fixture-1", "home_team": "HOME", "away_team": "AWAY",
+            "home_score": 2, "away_score": 1, "competition": "LEAGUE",
+            "official_match_date": "2026-09-09", "original_kickoff_time": "20:00",
+        }
+        first = _caption_for_single(result, {}, "post1")
+        second = _caption_for_single(result, {}, "post2")
+        self.assertNotEqual(first["caption_tk"], second["caption_tk"])
+        self.assertNotEqual(first["caption_yt"], second["caption_yt"])
+
+    def test_cross_batch_gate_rejects_duplicate_poster(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = date(2026, 9, 9)
+            for batch, style, caption, video_bytes in (
+                ("post1", "cinematic", "copy one", b"video-one"),
+                ("post2", "collage", "copy two", b"video-two"),
+            ):
+                run = postmatch_run_dir(root, target, batch)
+                (run / "phase3").mkdir(parents=True)
+                (run / "phase4").mkdir(parents=True)
+                video = run / "phase4" / "final.mp4"
+                video.write_bytes(video_bytes)
+                (run / "phase3" / "production-manifest.json").write_text(
+                    json.dumps({"posters": [{"task_id": "match", "sha256": "same", "style": style}]}),
+                    encoding="utf-8",
+                )
+                (run / "phase4" / "build-manifest.json").write_text(
+                    json.dumps({"items": [{"task_id": "match", "final": str(video)}]}),
+                    encoding="utf-8",
+                )
+                (run / "phase4" / "captions.json").write_text(
+                    json.dumps({"items": {"match": caption}}), encoding="utf-8"
+                )
+            with self.assertRaisesRegex(RuntimeError, "poster_sha256"):
+                _validate_cross_batch_uniqueness(root, target, "post2")
+
+    def test_apimart_video_fallback_uses_required_contract_without_key_in_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / "scripts" / "generate-apimart-video.mjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("", encoding="utf-8")
+            master = root / "master.png"
+            master.write_bytes(b"poster")
+            output = root / "hook.mp4"
+
+            def fake_run(command, **kwargs):
+                output.write_bytes(b"0" * 20_001)
+                self.assertNotIn("test-secret", command)
+                self.assertEqual(kwargs["env"]["APIMART_API_KEY"], "test-secret")
+                self.assertIn("wan2.6-i2v-flash", command)
+                self.assertEqual(command[command.index("--duration") + 1], "4")
+                self.assertEqual(command[command.index("--resolution") + 1], "720p")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("jaguartv_postmatch.phase4.env_or_keychain", return_value="test-secret"), patch(
+                "jaguartv_postmatch.phase4.subprocess.run", side_effect=fake_run
+            ):
+                result = _generate_apimart_video({}, root, master, "animate poster", output)
+            self.assertEqual(result["provider"], "apimart")
+            self.assertTrue(result["fallback_used"])
+
+    def test_cta_voice_inventory_contains_reusable_male_and_female_voices(self) -> None:
+        voices = {entry["voice"] for entry in DEFAULT_INVENTORY}
+        self.assertIn("onyx", voices)
+        self.assertTrue({"nova", "shimmer"} & voices)
+
+    def test_publish_copy_contains_download_sentence_and_required_tags(self) -> None:
+        item = _caption_for_single(
+            {
+                "task1_fixture_id": "corinthians_santos_260830",
+                "home_team": "CORINTHIANS",
+                "away_team": "SANTOS",
+                "home_score": 0,
+                "away_score": 1,
+                "competition": "BRASILEIRAO",
+                "official_match_date": "2026-08-30",
+                "original_kickoff_time": "16:00",
+            },
+            {"verified_match_record": {"goals": []}},
+        )
+        sentence = "Acesse jaguartvbrasil.com/baixar-app para baixar."
+        self.assertIn(sentence, item["caption_tk"])
+        self.assertIn(sentence, item["caption_yt"])
+        self.assertEqual(len(item["tags_tk"]), 5)
+        self.assertIn("#jaguartv", item["tags_tk"])
+        self.assertIn("#iptv", item["tags_tk"])
+        self.assertIn("#jaguartv", item["tags_yt"])
+        self.assertIn("#iptv", item["tags_yt"])
 
     def test_api_football_final_result_maps_penalties(self) -> None:
         event = {
