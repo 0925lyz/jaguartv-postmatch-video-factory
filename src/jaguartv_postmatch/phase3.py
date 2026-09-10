@@ -141,6 +141,9 @@ TEAM_COLORS = {
 CHANNEL_FILES = {
     "ESPN": "ESPN.png",
     "DISNEY+": "Disney_Plus.png",
+    "TNT": "TNT.png",
+    "HBO MAX": "HBO_Max.png",
+    "SPACE": "Space.jpg",
     "YOUTUBE": "YouTube.png",
     "CAZÉTV": "CazeTV.png",
     "SPORTYNET": "SportyNet.png",
