@@ -714,6 +714,58 @@ def _load_primary_key() -> str:
     return str(key)
 
 
+def _http_get_json(url: str, key: str, timeout: int = 45) -> dict[str, Any]:
+    """GET JSON with the bearer key passed through a header file, never on the command line."""
+    with tempfile.TemporaryDirectory(prefix="jaguartv-get-") as temp_name:
+        temp = Path(temp_name)
+        header_path = temp / "headers.txt"
+        header_path.write_text(f"Authorization: Bearer {key}\n", encoding="utf-8")
+        header_path.chmod(0o600)
+        response_path = temp / "response.json"
+        completed = subprocess.run(
+            [
+                "/usr/bin/curl", "--silent", "--show-error", "--max-time", str(timeout),
+                "-H", f"@{header_path}", url, "-o", str(response_path),
+            ],
+            capture_output=True, timeout=timeout + 20, check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.decode("utf-8", errors="replace")[-300:])
+        try:
+            return json.loads(response_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            body = response_path.read_text(encoding="utf-8", errors="replace")[:300]
+            raise RuntimeError(f"non-JSON response: {body or str(error)}") from error
+
+
+def _wait_async_image_url(base_url: str, key: str, task_id: str, timeout_seconds: int = 900) -> str:
+    """APIMart gpt-image-2 returns an async task handle; poll /tasks/{id} until the image is ready."""
+    root = base_url.rstrip("/")
+    poll_url = f"{root}/tasks/{task_id}" if root.endswith("/v1") else f"{root}/v1/tasks/{task_id}"
+    deadline = time.time() + timeout_seconds
+    last_status = ""
+    while time.time() < deadline:
+        payload = _http_get_json(poll_url, key)
+        data = payload.get("data") or {}
+        status = str(data.get("status") or "").lower()
+        last_status = status
+        if status in {"completed", "succeeded", "success", "done", "finished"}:
+            images = ((data.get("result") or {}).get("images") or [])
+            for image in images:
+                url = image.get("url")
+                if isinstance(url, list) and url:
+                    return str(url[0])
+                if isinstance(url, str) and url:
+                    return url
+                if image.get("b64_json"):
+                    return str(image["b64_json"])
+            raise RuntimeError(f"async task completed without image payload: {json.dumps(data)[:300]}")
+        if status in {"failed", "error", "cancelled", "canceled"}:
+            raise RuntimeError(f"async task failed: {json.dumps(data)[:300]}")
+        time.sleep(8)
+    raise RuntimeError(f"async task timed out (last status={last_status or 'unknown'})")
+
+
 def _call_image_endpoint(base_url: str, key: str, prompt: str, output: Path, attempts: int) -> list[dict[str, Any]]:
     request_log = []
     payload = {
@@ -760,7 +812,18 @@ def _call_image_endpoint(base_url: str, key: str, prompt: str, output: Path, att
                 if item.get("b64_json"):
                     output.write_bytes(base64.b64decode(item["b64_json"]))
                 elif item.get("url"):
-                    fetch = subprocess.run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "300", item["url"], "-o", str(output)], capture_output=True, timeout=330, check=False)
+                    image_url = item["url"]
+                    if isinstance(image_url, list):
+                        image_url = image_url[0] if image_url else ""
+                    if not image_url:
+                        raise RuntimeError("Image2 response contained no image payload")
+                    fetch = subprocess.run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "300", str(image_url), "-o", str(output)], capture_output=True, timeout=330, check=False)
+                    if fetch.returncode != 0:
+                        raise RuntimeError(fetch.stderr.decode("utf-8", errors="replace")[-500:])
+                elif item.get("task_id"):
+                    # APIMart serves gpt-image-2 through an async task queue: submit -> task_id -> poll.
+                    image_url = _wait_async_image_url(base_url, key, str(item["task_id"]))
+                    fetch = subprocess.run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "300", image_url, "-o", str(output)], capture_output=True, timeout=330, check=False)
                     if fetch.returncode != 0:
                         raise RuntimeError(fetch.stderr.decode("utf-8", errors="replace")[-500:])
                 else:
