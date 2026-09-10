@@ -343,6 +343,7 @@ def research_match(result: dict[str, Any]) -> dict[str, Any]:
     retrieved_at = utc_now()
     english_date, portuguese_date = _research_date_text(result)
     structured = str(result.get("provider_status") or "") != "SOURCE_CARD_FINAL"
+    event_id = ""
     if structured:
         summary = {}
         summary_url = str(result.get("status_verification_url") or result.get("official_source_url") or "")
@@ -410,7 +411,7 @@ def research_match(result: dict[str, Any]) -> dict[str, Any]:
             "use_for_facts": True,
         },
     ]
-    if structured:
+    if structured and event_id:
         source_records.append(
             {
                 "source_url": summary_url,

@@ -259,7 +259,14 @@ def match_api_football_event(fixture: Task1Fixture, events: list[dict[str, Any]]
         if _team_match(fixture.home_team, home) and _team_match(fixture.away_team, away):
             candidates.append(event)
     if len(candidates) > 1:
-        raise RuntimeError(f"API-Football event is not unique for {fixture.task1_fixture_id}: {len(candidates)}")
+        dated_candidates = [
+            event
+            for event in candidates
+            if str(((event.get("fixture") or {}).get("date")) or "").startswith(fixture.match_date)
+        ]
+        if len(dated_candidates) == 1:
+            return dated_candidates[0]
+        return None
     return candidates[0] if candidates else None
 
 
