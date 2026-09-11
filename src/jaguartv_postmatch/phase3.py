@@ -160,6 +160,7 @@ CHANNEL_FILES = {
     "NSPORTS": "NSPORTS.png",
     "FANATIZ": "FANATIZ.png",
     "XSPORTS": "XSports.png",
+    "PARAMOUNT+": "Paramount_Plus.png",
 }
 
 STYLE_DIRECTIONS = [
