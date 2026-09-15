@@ -45,7 +45,9 @@ API-Football 密钥读取 `API_FOOTBALL_KEY`，不要写进配置或仓库。
 CTA 口播只扫描 `assets/audio/voiceover` 中的本地 WAV，不调用 TTS；背景音乐同样只使用
 `assets/audio/music` 的本地文件。发布文案固定包含
 `Acesse jaguartvbrasil.com/baixar-app para baixar.`，TikTok 的 5 个标签必须包含
-`#jaguartv` 与 `#iptv`。
+`#jaguartv` 与 `#iptv`。另外 3 个标签从球队、赛事和赛果语义中选择短且相关的常用标签，
+不再粗暴截断成长字母串。`captions.json` 同时标记发布时必须启用商业内容披露及适用的
+AI 生成内容标签。
 
 ## 使用
 

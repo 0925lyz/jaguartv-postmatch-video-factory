@@ -67,5 +67,11 @@ These rules apply to every task and automation in this repository.
   the same order without numbering inside the public text.
 - Every TikTok and YouTube caption includes `Acesse jaguartvbrasil.com/baixar-app para baixar.`.
   TikTok uses exactly five hashtags and includes `#jaguartv` and `#iptv`; `#jaguartvbrasil` is optional.
+- TikTok titles and captions stay concise and use natural Brazilian football language. The other three
+  hashtags must be compact team or popular competition/result tags; never truncate a long phrase into
+  a meaningless hashtag.
+- Do not claim `transmissão liberada`, `sem travamentos`, a free trial, or another offer unless that
+  exact claim is verified for the run. TikTok publishing must enable commercial-content disclosure and
+  the applicable AI-generated-content label; `captions.json` records these requirements.
 - Upload only validated artifacts to Pending Review under the exact label `赛后比分`.
 - Stop at the first unavailable required integration and emit a sanitized failure report.

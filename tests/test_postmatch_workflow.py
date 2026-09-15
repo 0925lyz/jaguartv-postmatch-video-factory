@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ from jaguartv_postmatch.phase4 import (
     VIDEO_ASSEMBLY_POLICY,
     _assembly_timing,
     _caption_for_single,
+    _caption_tags,
     _generate_apimart_video,
     _motion_context,
     video_filenames,
@@ -527,10 +529,46 @@ Verified match-specific summary.
         self.assertIn(sentence, item["caption_tk"])
         self.assertIn(sentence, item["caption_yt"])
         self.assertEqual(len(item["tags_tk"]), 5)
+        self.assertEqual(item["tags_tk"][:3], ["#corinthians", "#santos", "#brasileirao"])
         self.assertIn("#jaguartv", item["tags_tk"])
         self.assertIn("#iptv", item["tags_tk"])
+        self.assertTrue(all(re.fullmatch(r"#[a-z0-9]{1,20}", tag) for tag in item["tags_tk"]))
+        self.assertEqual(item["title_tk"], "Corinthians 0 x 1 Santos: placar final")
+        self.assertLessEqual(len(item["caption_tk"]), 300)
+        self.assertNotIn("sem travamentos", item["caption_tk"])
+        self.assertNotIn("transmissão liberada", item["caption_tk"].lower())
         self.assertIn("#jaguartv", item["tags_yt"])
         self.assertIn("#iptv", item["tags_yt"])
+
+    def test_publish_tags_compact_long_names_and_use_popular_competition_alias(self) -> None:
+        tags = _caption_tags(
+            "Clube Atlético Mineiro SAF",
+            "Associação Desportiva Ferroviária Vale do Rio Doce",
+            "UEFA Champions League · League Phase",
+        )
+        self.assertEqual(len(tags), 5)
+        self.assertIn("#championsleague", tags)
+        self.assertEqual(tags[-2:], ["#jaguartv", "#iptv"])
+        self.assertTrue(all(re.fullmatch(r"#[a-z0-9]{1,20}", tag) for tag in tags))
+        self.assertNotIn("#brasileirao", _caption_tags("Inter", "Milan", "Serie A"))
+
+    def test_long_goal_list_keeps_required_download_sentence(self) -> None:
+        item = _caption_for_single(
+            {
+                "task1_fixture_id": "long-goals",
+                "home_team": "REAL MADRID",
+                "away_team": "INTER DE MILAO",
+                "home_score": 8,
+                "away_score": 7,
+                "competition": "UEFA CHAMPIONS LEAGUE",
+                "official_match_date": "2026-09-15",
+                "original_kickoff_time": "20:00",
+            },
+            {"verified_match_record": {"goals": [{"scorer": "Nome Muito Comprido"}] * 20}},
+        )
+        self.assertLessEqual(len(item["caption_tk"]), 300)
+        self.assertIn("Inter de Milao", item["title_tk"])
+        self.assertTrue(item["caption_tk"].endswith("Acesse jaguartvbrasil.com/baixar-app para baixar."))
 
     def test_api_football_final_result_maps_penalties(self) -> None:
         event = {

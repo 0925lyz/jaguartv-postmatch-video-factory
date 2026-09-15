@@ -38,6 +38,9 @@ VIDEO_ASSEMBLY_POLICY = (
     "the actual segment durations"
 )
 DOWNLOAD_SENTENCE = "Acesse jaguartvbrasil.com/baixar-app para baixar."
+TIKTOK_CAPTION_LIMIT = 300
+TIKTOK_TITLE_LIMIT = 90
+REQUIRED_HASHTAGS = ("#jaguartv", "#iptv")
 SINGLE_HOOK_ACTION_POLICY = (
     "animate the poster background with stadium light, smoke, crowd depth, fabric motion, and score energy; "
     "the winning player may jump, shout, pump fists, and celebrate intensely; "
@@ -702,22 +705,33 @@ def _caption_for_single(
         if detail:
             goal_parts.append(detail)
     goal_text = ", ".join(goal_parts)
-    match = f"{result['home_team'].title()} {result['home_score']} x {result['away_score']} {result['away_team'].title()}"
+    home_name = _display_team(result["home_team"])
+    away_name = _display_team(result["away_team"])
+    match = f"{home_name} {result['home_score']} x {result['away_score']} {away_name}"
     parsed_date = date.fromisoformat(result["official_match_date"])
     months = ("janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro")
     date_text = f"{parsed_date.day} de {months[parsed_date.month - 1]} de {parsed_date.year}"
     tags = _caption_tags(result["home_team"], result["away_team"], result["competition"])
     lead_tk = "APITO FINAL" if batch_id == "post2" else "PLACAR FINAL"
     lead_yt = "No apito final" if batch_id == "post2" else "Resultado oficial"
+    if result["home_score"] > result["away_score"]:
+        verdict = f"Deu {home_name}!"
+    elif result["away_score"] > result["home_score"]:
+        verdict = f"Deu {away_name}!"
+    else:
+        verdict = "Tudo igual!"
+    goals_copy = f" Gols: {goal_text}." if goal_text else ""
+    caption_tk = _tiktok_caption(
+        f"🔥 {lead_tk}: {match}. {verdict}{goals_copy} "
+        "Quer acompanhar os próximos jogos? Jaguar TV no Android e TV Box.",
+    )
     return {
         "match": match,
         "task1_fixture_id": result["task1_fixture_id"],
-        "caption_tk": (
-            f"{lead_tk}: {match}. "
-            f"{('Gols: ' + goal_text + '. ') if goal_text else ''}"
-            f"{DOWNLOAD_SENTENCE}"
-        ),
+        "title_tk": _short_text(f"{match}: placar final", TIKTOK_TITLE_LIMIT),
+        "caption_tk": caption_tk,
         "tags_tk": tags,
+        "title_yt": _short_text(f"{match}: placar final | {result['competition']}", 100),
         "caption_yt": (
             f"{lead_yt}: {match}, por {result['competition']}, em {date_text}. "
             f"A partida começou às {result['original_kickoff_time']} no Horário de Brasília. "
@@ -729,12 +743,63 @@ def _caption_for_single(
 
 
 def _caption_tags(home: str, away: str, competition: str) -> list[str]:
-    def tag(value: str) -> str:
-        slug = re.sub(r"[^a-z0-9]+", "", normalize_name(value))
-        return f"#{slug[:28] or 'futebol'}"
+    candidates = [
+        _compact_hashtag(home),
+        _compact_hashtag(away),
+        _competition_hashtag(competition),
+        "#futebol",
+        "#placarfinal",
+    ]
+    selected: list[str] = []
+    for tag in candidates:
+        if tag not in selected and tag not in REQUIRED_HASHTAGS:
+            selected.append(tag)
+        if len(selected) == 3:
+            break
+    return selected + list(REQUIRED_HASHTAGS)
 
-    league = tag(competition.split("·", 1)[0])
-    return [tag(home), tag(away), league, "#jaguartv", "#iptv"]
+
+def _display_team(value: str) -> str:
+    return re.sub(r"\b(De|Da|Do|Dos|Das)\b", lambda found: found.group(1).lower(), value.title())
+
+
+def _compact_hashtag(value: str) -> str:
+    ignored = {"associacao", "club", "clube", "da", "das", "de", "do", "dos", "ec", "esporte", "fc", "football", "futebol", "saf", "sc"}
+    words = [word for word in re.findall(r"[a-z0-9]+", normalize_name(value)) if word not in ignored]
+    joined = "".join(words)
+    if joined and len(joined) <= 20:
+        return f"#{joined}"
+    short = next((word for word in words if len(word) <= 20), "futebol")
+    return f"#{short}"
+
+
+def _competition_hashtag(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "", normalize_name(value))
+    aliases = (
+        (("championsleague", "ligadoscampeoes"), "#championsleague"),
+        (("libertadores",), "#libertadores"),
+        (("sudamericana", "sulamericana"), "#sulamericana"),
+        (("brasileirao", "campeonatobrasileiro"), "#brasileirao"),
+        (("copadobrasil",), "#copadobrasil"),
+        (("premierleague",), "#premierleague"),
+    )
+    for names, hashtag in aliases:
+        if any(name in slug for name in names):
+            return hashtag
+    return _compact_hashtag(value)
+
+
+def _short_text(value: str, limit: int) -> str:
+    value = " ".join(str(value).split())
+    if len(value) <= limit:
+        return value
+    shortened = value[: limit - 3].rsplit(" ", 1)[0].rstrip(".,:;!?")
+    return f"{shortened or value[:limit - 3]}..."
+
+
+def _tiktok_caption(body: str) -> str:
+    suffix = f" {DOWNLOAD_SENTENCE}"
+    return f"{_short_text(body, TIKTOK_CAPTION_LIMIT - len(suffix))}{suffix}"
 
 
 def _captions(
@@ -747,6 +812,11 @@ def _captions(
         "timezone_label": "Horário de Brasília",
         "batch_id": batch_id,
         "generated_at": utc_now(),
+        "tiktok_policy": {
+            "commercial_content_disclosure_required": True,
+            "ai_generated_content_label_required": True,
+            "max_hashtags": 5,
+        },
         "items": {},
     }
     for entry in sorted(entries, key=lambda item: str(item.get("sequence") or "")):
@@ -762,11 +832,13 @@ def _captions(
             date_text = f"{target_date.day} de {months[target_date.month - 1]} de {target_date.year}"
             payload["items"][entry["task_id"]] = {
                 "summary": True,
-                "caption_tk": (
-                    f"{'GIRO DE RESULTADOS' if batch_id == 'post2' else 'PLACARES FINAIS'} de {date_text}: {joined}. "
-                    f"{DOWNLOAD_SENTENCE}"
+                "title_tk": _short_text(f"Placares do dia: resultados de {date_text}", TIKTOK_TITLE_LIMIT),
+                "caption_tk": _tiktok_caption(
+                    f"🔥 {'Giro de resultados' if batch_id == 'post2' else 'Placares finais'}: {joined}. "
+                    "Confira os próximos jogos no Jaguar TV.",
                 ),
                 "tags_tk": ["#placares", "#futebol", "#resultados", "#jaguartv", "#iptv"],
+                "title_yt": _short_text(f"Placares finais de {date_text}", 100),
                 "caption_yt": (
                     f"{'Confira o giro dos placares' if batch_id == 'post2' else 'Resumo dos resultados oficiais'} de {date_text}, no Horário de Brasília: {joined}. "
                     f"{DOWNLOAD_SENTENCE}"
