@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from jaguartv_postmatch.assets import _png_dimensions
 from jaguartv_postmatch.collector import _api_football_event_result, match_api_football_event, parse_result_card_text
+from jaguartv_postmatch.competition import competition_kind
 from jaguartv_postmatch.lock import ProcessLock
 from jaguartv_postmatch.research import (
     is_match_specific_social_record,
@@ -36,10 +37,11 @@ from jaguartv_postmatch.phase4 import (
 )
 from jaguartv_postmatch.voice import DEFAULT_INVENTORY, cta_voice_filename
 from jaguartv_postmatch.phase5 import _artifact_revision, _validate_cross_batch_uniqueness
+from jaguartv_postmatch.retry import retry_forever
 from jaguartv_postmatch.store import WorkflowStore
 from jaguartv_postmatch.task1 import Task1Fixture
 from jaguartv_postmatch.task1 import load_task1_fixtures
-from jaguartv_postmatch.util import single_poster_filename
+from jaguartv_postmatch.util import deterministic_motion_plan, single_poster_filename
 from jaguartv_postmatch.util import postmatch_run_dir
 
 
@@ -305,16 +307,16 @@ Verified match-specific summary.
         self.assertIn("verified-red-card-scene", match["allowed_poster_concepts"])
         self.assertNotIn("Unverified social claim.", match["verified_research_summaries"])
 
-    def test_image2_uses_apimart_before_active_api(self) -> None:
+    def test_image2_uses_active_api_before_apimart(self) -> None:
         task = PosterTask("match", "single", "prompt", "poster.png", [], "style")
         with tempfile.TemporaryDirectory() as directory, patch(
-            "jaguartv_postmatch.phase3.env_or_keychain", return_value="apimart-key"
+            "jaguartv_postmatch.phase3._load_primary_key", return_value="active-key"
         ), patch("jaguartv_postmatch.phase3._call_image_endpoint", return_value=[]) as call:
             provider, _ = generate_image2(task, Path(directory) / "raw.png", 3)
-        self.assertEqual(provider, "apimart")
-        self.assertEqual(call.call_args.args[0], APIMART_BASE_URL)
+        self.assertEqual(provider, "active-large-model-api")
+        self.assertEqual(call.call_args.args[0], CRS_BASE_URL)
 
-    def test_image2_falls_back_to_active_api_after_apimart_failure(self) -> None:
+    def test_image2_falls_back_to_apimart_after_active_api_failure(self) -> None:
         task = PosterTask("match", "single", "prompt", "poster.png", [], "style")
         with tempfile.TemporaryDirectory() as directory, patch(
             "jaguartv_postmatch.phase3.env_or_keychain", return_value="apimart-key"
@@ -322,12 +324,12 @@ Verified match-specific summary.
             "jaguartv_postmatch.phase3._load_primary_key", return_value="active-key"
         ), patch(
             "jaguartv_postmatch.phase3._call_image_endpoint",
-            side_effect=[RuntimeError("APIMart unavailable"), []],
+            side_effect=[RuntimeError("active route unavailable"), []],
         ) as call:
             provider, attempts = generate_image2(task, Path(directory) / "raw.png", 3)
-        self.assertEqual(provider, "active-large-model-api")
-        self.assertEqual([item.args[0] for item in call.call_args_list], [APIMART_BASE_URL, CRS_BASE_URL])
-        self.assertEqual(attempts[0]["provider"], "apimart")
+        self.assertEqual(provider, "apimart")
+        self.assertEqual([item.args[0] for item in call.call_args_list], [CRS_BASE_URL, APIMART_BASE_URL])
+        self.assertEqual(attempts[0]["provider"], "active-large-model-api")
         self.assertFalse(attempts[0]["ok"])
 
     def test_motion_context_preserves_verified_red_card_side(self) -> None:
@@ -426,28 +428,86 @@ Verified match-specific summary.
     def test_apimart_video_fallback_uses_required_contract_without_key_in_command(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            script = root / "scripts" / "generate-apimart-video.mjs"
-            script.parent.mkdir(parents=True)
-            script.write_text("", encoding="utf-8")
             master = root / "master.png"
             master.write_bytes(b"poster")
             output = root / "hook.mp4"
+            submitted = {}
 
-            def fake_run(command, **kwargs):
-                output.write_bytes(b"0" * 20_001)
-                self.assertNotIn("test-secret", command)
-                self.assertEqual(kwargs["env"]["APIMART_API_KEY"], "test-secret")
-                self.assertIn("wan2.6-i2v-flash", command)
-                self.assertEqual(command[command.index("--duration") + 1], "4")
-                self.assertEqual(command[command.index("--resolution") + 1], "720p")
-                return subprocess.CompletedProcess(command, 0, "", "")
+            def fake_request(_url, _key, payload, **_kwargs):
+                submitted.update(payload)
+                return {"data": [{"task_id": "task-1"}]}
+
+            class Download:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self):
+                    return b"0" * 20_001
 
             with patch("jaguartv_postmatch.phase4.env_or_keychain", return_value="test-secret"), patch(
-                "jaguartv_postmatch.phase4.subprocess.run", side_effect=fake_run
-            ):
+                "jaguartv_postmatch.phase4._upload_image_python", return_value="https://asset.invalid/master.png"
+            ), patch("jaguartv_postmatch.phase4._request_json_python", side_effect=fake_request), patch(
+                "jaguartv_postmatch.phase4._wait_apimart_task_python",
+                return_value={"result": {"videos": [{"url": "https://asset.invalid/hook.mp4"}]}},
+            ), patch("jaguartv_postmatch.phase4.urllib.request.urlopen", return_value=Download()):
                 result = _generate_apimart_video({}, root, master, "animate poster", output)
-            self.assertEqual(result["provider"], "apimart")
+            self.assertEqual(result["provider"], "apimart-python")
             self.assertTrue(result["fallback_used"])
+            self.assertEqual(submitted["model"], "wan2.6-i2v-flash")
+            self.assertEqual(submitted["duration"], 4)
+            self.assertEqual(submitted["resolution"], "720P")
+
+    def test_competition_ids_aliases_and_non_brazilian_serie_a(self) -> None:
+        self.assertEqual(competition_kind(13, "unexpected"), "copa_libertadores")
+        self.assertEqual(competition_kind(11, "unexpected"), "copa_sudamericana")
+        self.assertEqual(competition_kind(None, "Copa Sul-Americana - Quartas"), "copa_sudamericana")
+        self.assertEqual(competition_kind(None, "Taça Libertadores da América"), "copa_libertadores")
+        self.assertIsNone(competition_kind(None, "Serie A - Regular Season", "Italy"))
+
+    def test_motion_plan_is_reproducible_and_exactly_half(self) -> None:
+        even = deterministic_motion_plan(["a", "b", "c", "d"], "seed")
+        odd = deterministic_motion_plan(["a", "b", "c", "d", "e"], "seed")
+        self.assertEqual(even, deterministic_motion_plan(["a", "b", "c", "d"], "seed"))
+        self.assertEqual(sum(item["video_model_called"] for item in even.values()), 2)
+        self.assertEqual(sum(item["video_model_called"] for item in odd.values()), 2)
+        self.assertEqual(sum(item["reason"] == "odd_batch_candidate_dropped_to_static" for item in odd.values()), 1)
+
+    def test_apimart_retry_persists_transient_failure_and_rejects_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "retry.json"
+            calls = []
+
+            def transient_then_success():
+                calls.append(1)
+                if len(calls) == 1:
+                    raise RuntimeError("HTTP 503 temporary service error")
+                return "ok"
+
+            self.assertEqual(retry_forever(
+                transient_then_success, state_path=state, operation_name="test",
+                base_delay=0, sleeper=lambda _delay: None,
+            ), "ok")
+            self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["status"], "succeeded")
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+                retry_forever(
+                    lambda: (_ for _ in ()).throw(RuntimeError("HTTP 401 invalid API key")),
+                    state_path=Path(temporary) / "auth.json", operation_name="auth",
+                    base_delay=0, sleeper=lambda _delay: None,
+                )
+            resume = Path(temporary) / "resume.json"
+            resume.write_text(json.dumps({
+                "status": "retry_wait", "attempt": 4,
+                "next_retry_at": "2099-01-01T00:00:00+00:00",
+            }), encoding="utf-8")
+            resumed_delays = []
+            self.assertEqual(retry_forever(
+                lambda: "resumed", state_path=resume, operation_name="resume",
+                sleeper=resumed_delays.append,
+            ), "resumed")
+            self.assertTrue(resumed_delays and resumed_delays[0] > 0)
 
     def test_cta_voice_inventory_contains_reusable_male_and_female_voices(self) -> None:
         voices = {entry["voice"] for entry in DEFAULT_INVENTORY}

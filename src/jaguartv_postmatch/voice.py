@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .credentials import CredentialUnavailable, env_or_keychain
+from .retry import retry_forever
 from .util import utc_now
 
 
@@ -106,17 +107,19 @@ def generate_apimart_voice(
         "APIMART_API_KEY": key,
         "APIMART_BASE_URL": _apimart_base_url(),
     }
-    completed = subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        env=environment,
-        timeout=180,
-        check=False,
+    def generate_once() -> None:
+        completed = subprocess.run(
+            command, text=True, capture_output=True, env=environment, timeout=180, check=False,
+        )
+        if completed.returncode != 0 or not output.is_file() or output.stat().st_size < 1000:
+            detail = _sanitized_error(completed.stderr or completed.stdout or "APIMart TTS failed")
+            raise RuntimeError(detail)
+
+    retry_forever(
+        generate_once,
+        state_path=output.with_suffix(".apimart-retry.json"),
+        operation_name=f"tts:{output.stem}",
     )
-    if completed.returncode != 0 or not output.is_file() or output.stat().st_size < 1000:
-        detail = _sanitized_error(completed.stderr or completed.stdout or "APIMart TTS failed")
-        raise RuntimeError(detail)
 
     payload = {
         "schema_version": "jaguartv-cta-voice-v1",
@@ -202,9 +205,9 @@ def prepare_voice_rotation(
                 }
             )
         except Exception as error:  # noqa: BLE001
-            meta["skipped"].append(
-                {"voice": voice_name, "variant_id": variant_id, "reason": _sanitized_error(str(error))}
-            )
+            raise RuntimeError(
+                f"APIMart CTA inventory item {variant_id} failed permanently: {_sanitized_error(str(error))}"
+            ) from error
 
     rotation = generated + [path for path in local_voices if path not in generated]
     if not rotation:

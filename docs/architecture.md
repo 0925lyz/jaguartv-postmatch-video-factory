@@ -39,21 +39,25 @@ WorkBuddy owns scheduling. This repository exposes execution scripts but stores 
 Phase 3 first sends the verified Phase 2 evidence to the current task text model. That model writes
 one complete English Image2 prompt per match and may select a verified goalscorer celebration,
 correctly mapped red-card scene, another supported turning point, or result-reaction composition.
-APIMart Image2 is attempted first; the active large-model API `gpt-image-2` route is the recorded fallback.
+The configured active large-model API `gpt-image-2` route is attempted first. APIMart Image2 is the
+explicit secondary route and is never silently replaced by another provider.
 
 ## Video assembly rule
 
-The only generated video segment is the four-second opening poster hook created from the validated
-poster master. Dreamina/Jimeng VIP Seedance 2.0 Fast 720p is primary; APIMart
+For each batch, a stable hash selects exactly `floor(N/2)` clean poster backgrounds for a generated
+four-second hook. Unselected posters use a local four-second still and never enter a video model.
+Dreamina/Jimeng VIP Seedance 2.0 Fast 720p is primary; APIMart
 `wan2.6-i2v-flash` at 720p for four seconds is the recorded fallback. Downloader/search/main-interface
 segments, motion CTA, music, and voiceover are selected from existing authorized inventory. Both
 operation clips and the CTA play in full, so final duration is calculated from actual media durations.
-During that hook, the poster background should animate and the players may show strong score-based
-emotion. The fixed upper-right Figure 1 logo, score, crests, and date must stay unchanged.
+During generated hooks, only the background moves. The deterministic 2048x2560 poster compositor
+retains all text, score, crests, authorized channel icons, and the exact Figure 1 logo in a transparent
+locked foreground, then reapplies it frame-for-frame over the moving background.
 Final video filenames are ordered with a Chinese `01`/`02`/`03` prefix matching caption order.
 
 ## Failure behavior
 
-The runner stops at the failing phase and records the operation, integration, sanitized error,
-checks, retries, last successful artifact, and required operator action. It never fabricates a
-poster, player identity, server record, or upload ID.
+Transient APIMart failures persist provider task IDs, attempt counts, failure context, and the next
+retry time, then retry with exponential backoff and jitter until success. Authentication, invalid
+parameters, safety rejection, and missing assets stop with explicit diagnosis. The runner never
+fabricates a poster, player identity, server record, or upload ID.

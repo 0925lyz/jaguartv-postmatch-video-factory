@@ -3,25 +3,23 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageStat
 
 from .credentials import env_or_keychain
+from .retry import _write_state, retry_forever
 from .util import canonical_team, codex_model_args, normalize_name, postmatch_run_dir, utc_now
 
 
 W, H = 2048, 2560
-# Image2 size presets map to portrait orientations, not exact pixels; 1280x1024 yields a
-# 5:4 (1.25) base that _enhance/_cover normalises to the 4:5 (2048x2560) poster canvas.
-RAW_W, RAW_H = 1280, 1024
+RAW_W, RAW_H = 1024, 1280
 FIXED_LOGO_POLICY = "use only the exact Figure 1 JaguarTV logo asset in the upper-right; never redesign, restyle, regenerate, replace, or distort it"
 CRS_BASE_URL = "https://crs.whynotm.abrdns.com"
 APIMART_BASE_URL = "https://api.apimart.ai/v1"
@@ -739,7 +737,7 @@ def _http_get_json(url: str, key: str, timeout: int = 45) -> dict[str, Any]:
             raise RuntimeError(f"non-JSON response: {body or str(error)}") from error
 
 
-def _wait_async_image_url(base_url: str, key: str, task_id: str, timeout_seconds: int = 900) -> str:
+def _wait_async_image_url(base_url: str, key: str, task_id: str, timeout_seconds: int = 900, state_path: Path | None = None) -> str:
     """APIMart gpt-image-2 returns an async task handle; poll /tasks/{id} until the image is ready."""
     root = base_url.rstrip("/")
     poll_url = f"{root}/tasks/{task_id}" if root.endswith("/v1") else f"{root}/v1/tasks/{task_id}"
@@ -762,12 +760,14 @@ def _wait_async_image_url(base_url: str, key: str, task_id: str, timeout_seconds
                     return str(image["b64_json"])
             raise RuntimeError(f"async task completed without image payload: {json.dumps(data)[:300]}")
         if status in {"failed", "error", "cancelled", "canceled"}:
+            if state_path:
+                _write_state(state_path, {"provider_task_id": "", "provider_task_status": status})
             raise RuntimeError(f"async task failed: {json.dumps(data)[:300]}")
         time.sleep(8)
     raise RuntimeError(f"async task timed out (last status={last_status or 'unknown'})")
 
 
-def _call_image_endpoint(base_url: str, key: str, prompt: str, output: Path, attempts: int) -> list[dict[str, Any]]:
+def _call_image_endpoint(base_url: str, key: str, prompt: str, output: Path, attempts: int, state_path: Path | None = None) -> list[dict[str, Any]]:
     request_log = []
     payload = {
         "model": "gpt-image-2",
@@ -776,6 +776,16 @@ def _call_image_endpoint(base_url: str, key: str, prompt: str, output: Path, att
         "quality": "medium",
         "output_format": "png",
     }
+    if state_path and state_path.is_file():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        task_id = str(state.get("provider_task_id") or "")
+        if task_id:
+            image_url = _wait_async_image_url(base_url, key, task_id, state_path=state_path)
+            fetch = subprocess.run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "300", image_url, "-o", str(output)], capture_output=True, timeout=330, check=False)
+            if fetch.returncode != 0:
+                raise RuntimeError(fetch.stderr.decode("utf-8", errors="replace")[-500:])
+            _validate_raw(output)
+            return [{"attempt": 0, "started_at": utc_now(), "completed_at": utc_now(), "ok": True, "resumed_task_id": task_id}]
     for attempt in range(1, attempts + 1):
         started = utc_now()
         try:
@@ -823,7 +833,9 @@ def _call_image_endpoint(base_url: str, key: str, prompt: str, output: Path, att
                         raise RuntimeError(fetch.stderr.decode("utf-8", errors="replace")[-500:])
                 elif item.get("task_id"):
                     # APIMart serves gpt-image-2 through an async task queue: submit -> task_id -> poll.
-                    image_url = _wait_async_image_url(base_url, key, str(item["task_id"]))
+                    if state_path:
+                        _write_state(state_path, {"provider_task_id": str(item["task_id"]), "provider_task_status": "polling"})
+                    image_url = _wait_async_image_url(base_url, key, str(item["task_id"]), state_path=state_path)
                     fetch = subprocess.run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "300", image_url, "-o", str(output)], capture_output=True, timeout=330, check=False)
                     if fetch.returncode != 0:
                         raise RuntimeError(fetch.stderr.decode("utf-8", errors="replace")[-500:])
@@ -847,28 +859,33 @@ def generate_image2(task: PosterTask, raw_path: Path, max_attempts: int) -> tupl
         except Exception:
             raw_path.unlink(missing_ok=True)
     try:
-        apimart_key = env_or_keychain("APIMART_API_KEY")
-    except Exception as error:  # noqa: BLE001
-        apimart_key = ""
-        apimart_error = f"{type(error).__name__}: credential unavailable"
-    else:
-        apimart_error = "APIMart credential is unavailable"
-    if apimart_key:
-        try:
-            return "apimart", _call_image_endpoint(
-                APIMART_BASE_URL, apimart_key, task.prompt, raw_path, max_attempts
-            )
-        except Exception as error:  # noqa: BLE001
-            apimart_error = f"{type(error).__name__}: {str(error)[:1000]}"
+        return "active-large-model-api", _call_image_endpoint(
+            CRS_BASE_URL, _load_primary_key(), task.prompt, raw_path, max_attempts
+        )
+    except Exception as primary_error:  # noqa: BLE001
+        primary_log = {
+            "provider": "active-large-model-api", "ok": False,
+            "error": f"{type(primary_error).__name__}: {str(primary_error)[:1000]}",
+        }
     try:
-        log = _call_image_endpoint(CRS_BASE_URL, _load_primary_key(), task.prompt, raw_path, 1)
-        log.insert(0, {"provider": "apimart", "ok": False, "error": apimart_error})
-        return "active-large-model-api", log
-    except Exception as error:  # noqa: BLE001
+        state_path = raw_path.with_suffix(".apimart-retry.json")
+        log = retry_forever(
+            lambda: _call_image_endpoint(
+                APIMART_BASE_URL, env_or_keychain("APIMART_API_KEY"), task.prompt, raw_path, 1, state_path
+            ),
+            state_path=state_path, operation_name=f"image2:{task.task_id}",
+        )
+        log.insert(0, primary_log)
+        for item in log[1:]:
+            item["provider"] = "apimart"
+            item["fallback_from"] = "active-large-model-api"
+        print(f"[image2] {task.task_id} primary failed; APIMart fallback succeeded", flush=True)
+        return "apimart", log
+    except Exception as fallback_error:  # noqa: BLE001
         raise RuntimeError(
-            f"APIMart Image2 failed ({apimart_error}); active large-model API Image2 failed "
-            f"({type(error).__name__}: {str(error)[:700]})"
-        ) from error
+            f"active large-model API Image2 failed ({primary_log['error']}); APIMart Image2 failed "
+            f"({type(fallback_error).__name__}: {str(fallback_error)[:700]})"
+        ) from fallback_error
 
 
 def _font(size: int, condensed: bool = False) -> ImageFont.FreeTypeFont:
@@ -903,12 +920,13 @@ def _contain(path: Path, size: tuple[int, int]) -> Image.Image:
 
 
 def _fit_font(draw: ImageDraw.ImageDraw, text: str, width: int, start: int, minimum: int, condensed: bool = False) -> ImageFont.FreeTypeFont:
-    for size in range(start, minimum - 1, -2):
+    floor = max(10, min(minimum, 12))
+    for size in range(start, floor - 1, -2):
         face = _font(size, condensed)
         box = draw.textbbox((0, 0), text, font=face, stroke_width=2)
         if box[2] - box[0] <= width:
             return face
-    return _font(minimum, condensed)
+    raise ValueError(f"Poster text cannot fit width {width}: {text[:160]}")
 
 
 def _text(draw: ImageDraw.ImageDraw, center: tuple[int, int], value: str, face: ImageFont.ImageFont, fill=(255, 255, 255, 255), stroke: int = 2) -> None:
@@ -939,13 +957,17 @@ def _overlay_shade(image: Image.Image, top: int = 150, bottom: int = 165) -> Non
 
 
 def _figure1(image: Image.Image, figure_path: Path) -> tuple[int, int, int, int]:
-    figure = _contain(figure_path, (270, 270))
+    figure = ImageOps.exif_transpose(Image.open(figure_path)).convert("RGBA")
+    figure.putdata([
+        (red, green, blue, 0 if green > 55 and green > red * 1.22 and green > blue * 1.18 else 255)
+        for red, green, blue, _ in figure.getdata()
+    ])
+    bbox = figure.getbbox()
+    if bbox:
+        figure = figure.crop(bbox)
+    figure.thumbnail((270, 270), Image.Resampling.LANCZOS)
     x, y = W - figure.width - 54, 46
-    plate = Image.new("RGBA", (figure.width + 20, figure.height + 20), (0, 0, 0, 0))
-    pd = ImageDraw.Draw(plate)
-    pd.rounded_rectangle((0, 0, plate.width - 1, plate.height - 1), radius=18, fill=(4, 12, 12, 205), outline=(246, 200, 55, 255), width=4)
-    plate.alpha_composite(figure, (10, 10))
-    image.alpha_composite(plate, (x - 10, y - 10))
+    image.alpha_composite(figure, (x, y))
     return (x, y, x + figure.width, y + figure.height)
 
 
@@ -969,11 +991,27 @@ def _single_fact_line(record: dict[str, Any]) -> str:
     return "RESULTADO OFICIAL CONFIRMADO"
 
 
-def compose_single(raw: Path, task: PosterTask, output: Path, figure_path: Path) -> dict[str, Any]:
+def _save_layers(image: Image.Image, background: Image.Image, output: Path) -> tuple[Path, Path]:
+    background_path = output.parent.parent / "backgrounds" / output.name
+    foreground_path = output.parent.parent / "foregrounds" / output.name
+    background_path.parent.mkdir(parents=True, exist_ok=True)
+    foreground_path.parent.mkdir(parents=True, exist_ok=True)
+    background.convert("RGB").save(background_path, "PNG", optimize=True)
+    difference = ImageChops.difference(image.convert("RGB"), background.convert("RGB"))
+    red, green, blue = difference.split()
+    mask = ImageChops.lighter(ImageChops.lighter(red, green), blue).point(lambda value: 255 if value else 0)
+    foreground = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    foreground.paste(image.convert("RGBA"), mask=mask)
+    foreground.save(foreground_path, "PNG", optimize=True)
+    return background_path, foreground_path
+
+
+def compose_single(raw: Path, task: PosterTask, output: Path, figure_path: Path, channel_dir: Path) -> dict[str, Any]:
     record = task.matches[0]
     result, fixture = record["result"], record["fixture"]
     image = _enhance(raw)
     _overlay_shade(image)
+    clean_background = image.copy()
     draw = ImageDraw.Draw(image)
     home_color = TEAM_COLORS.get(result["home_team"].upper(), ((25, 100, 180), (240, 240, 240)))[0]
     away_color = TEAM_COLORS.get(result["away_team"].upper(), ((180, 35, 45), (240, 240, 240)))[0]
@@ -1008,22 +1046,29 @@ def compose_single(raw: Path, task: PosterTask, output: Path, figure_path: Path)
     _text(draw, (570, 1585), home, _fit_font(draw, home, 700, 66, 36, True), (255, 255, 255, 255), 3)
     _text(draw, (W - 570, 1585), away, _fit_font(draw, away, 700, 66, 36, True), (255, 255, 255, 255), 3)
 
+    channel_icons = _channel_icons(image, channel_dir, list(result.get("channels") or []), W // 2, 1835, 1160)
+
     fact = _single_fact_line(record)
     footer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     fd = ImageDraw.Draw(footer)
     fd.rounded_rectangle((180, 2200, W - 180, 2400), radius=28, fill=(0, 5, 12, 205), outline=gold, width=4)
     image.alpha_composite(footer)
     draw = ImageDraw.Draw(image)
-    _text(draw, (W // 2, 2265), fact, _fit_font(draw, fact, 1500, 50, 28, True), (255, 255, 255, 255), 2)
-    _text(draw, (W // 2, 2340), "RESULTADO VERIFICADO", _font(38, True), gold, 2)
+    _text(draw, (W // 2, 2265), fact, _fit_font(draw, fact, 1500, 70, 42, True), (255, 255, 255, 255), 2)
+    _text(draw, (W // 2, 2345), "RESULTADO VERIFICADO", _font(46, True), gold, 2)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     image.convert("RGB").save(output, "PNG", optimize=True)
+    background_path, foreground_path = _save_layers(image, clean_background, output)
     visual = match_visual_direction(record)
     return {
         "figure_1_box": list(logo_box),
         "figure_1_source_sha256": _sha256(figure_path),
         "figure_1_fixed_source_asset": True,
+        "background_path": str(background_path.resolve()),
+        "foreground_path": str(foreground_path.resolve()),
+        "channel_icons_deterministic": True,
+        "channel_icons": channel_icons,
         "identity_mode": record["research"].get("poster_identity_mode", "virtual-hardman-player"),
         "fact_line": fact,
         "score_panel_box": list(score_panel_box),
@@ -1047,8 +1092,16 @@ def _channel_path(channel_dir: Path, name: str) -> Path:
     return path
 
 
-def _channel_icons(image: Image.Image, channel_dir: Path, channels: list[str], x: int, y: int, max_width: int) -> None:
-    icons = [_contain(_channel_path(channel_dir, name), (75, 52)) for name in channels]
+def _channel_icons(image: Image.Image, channel_dir: Path, channels: list[str], x: int, y: int, max_width: int) -> list[dict[str, Any]]:
+    icons = []
+    for name in channels:
+        icon = _contain(_channel_path(channel_dir, name), (170, 92))
+        for point in ((0, 0), (icon.width - 1, 0), (0, icon.height - 1), (icon.width - 1, icon.height - 1)):
+            red, green, blue, alpha = icon.getpixel(point)
+            if alpha > 240 and (max(red, green, blue) < 45 or min(red, green, blue) > 225):
+                ImageDraw.floodfill(icon, point, (red, green, blue, 0), thresh=34)
+        bbox = icon.getbbox()
+        icons.append(icon.crop(bbox) if bbox else icon)
     widths = [item.width for item in icons]
     gap = 14
     total = sum(widths) + gap * max(0, len(icons) - 1)
@@ -1058,9 +1111,17 @@ def _channel_icons(image: Image.Image, channel_dir: Path, channels: list[str], x
         widths = [item.width for item in icons]
         total = sum(widths) + gap * max(0, len(icons) - 1)
     cursor = x - total // 2
-    for icon in icons:
-        image.alpha_composite(icon, (cursor, y - icon.height // 2))
+    placements = []
+    for name, icon in zip(channels, icons):
+        top = y - icon.height // 2
+        image.alpha_composite(icon, (cursor, top))
+        source = _channel_path(channel_dir, name)
+        placements.append({
+            "channel": name, "source": str(source.resolve()), "sha256": _sha256(source),
+            "box": [cursor, top, cursor + icon.width, top + icon.height],
+        })
         cursor += icon.width + gap
+    return placements
 
 
 def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path, channel_dir: Path, target_date: date) -> dict[str, Any]:
@@ -1068,6 +1129,7 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
     # decoration from competing with the one factual row grid below.
     image = _enhance(raw).filter(ImageFilter.GaussianBlur(24))
     _overlay_shade(image, 175, 140)
+    clean_background = image.copy()
     gold = (250, 201, 62, 255)
     logo_box = _figure1(image, figure_path)
     draw = ImageDraw.Draw(image)
@@ -1077,6 +1139,7 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
 
     top, bottom = 350, 2460
     row_h = (bottom - top) // len(task.matches)
+    channel_icons = []
     for index, record in enumerate(task.matches):
         result, fixture = record["result"], record["fixture"]
         y0 = top + index * row_h
@@ -1088,7 +1151,7 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
         draw = ImageDraw.Draw(image)
 
         _text(draw, (180, yc - 58), result["original_kickoff_time"], _font(52, True), gold, 2)
-        _channel_icons(image, channel_dir, result["channels"], 180, yc + 22, 210)
+        channel_icons.extend(_channel_icons(image, channel_dir, result["channels"], 180, yc + 22, 210))
 
         home_color = TEAM_COLORS.get(result["home_team"].upper(), ((25, 100, 180), (240, 240, 240)))[0]
         away_color = TEAM_COLORS.get(result["away_team"].upper(), ((180, 35, 45), (240, 240, 240)))[0]
@@ -1107,10 +1170,15 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
 
     output.parent.mkdir(parents=True, exist_ok=True)
     image.convert("RGB").save(output, "PNG", optimize=True)
+    background_path, foreground_path = _save_layers(image, clean_background, output)
     return {
         "figure_1_box": list(logo_box),
         "figure_1_source_sha256": _sha256(figure_path),
         "figure_1_fixed_source_asset": True,
+        "background_path": str(background_path.resolve()),
+        "foreground_path": str(foreground_path.resolve()),
+        "channel_icons_deterministic": True,
+        "channel_icons": channel_icons,
         "rows": len(task.matches),
         "sorted_by_kickoff": True,
     }
@@ -1120,6 +1188,12 @@ def validate_poster(path: Path, task: PosterTask, compose_meta: dict[str, Any]) 
     with Image.open(path) as image:
         dimensions = [image.width, image.height]
         nonblank = max(ImageStat.Stat(image.convert("RGB").resize((32, 40))).var) > 25
+    background_path = Path(str(compose_meta.get("background_path") or ""))
+    foreground_path = Path(str(compose_meta.get("foreground_path") or ""))
+    background_size = Image.open(background_path).size if background_path.is_file() else None
+    foreground_size = Image.open(foreground_path).size if foreground_path.is_file() else None
+    foreground_alpha = Image.open(foreground_path).convert("RGBA").getchannel("A").getbbox() if foreground_path.is_file() else None
+    icon_boxes = [item.get("box") for item in compose_meta.get("channel_icons") or []]
     checks = {
         "exists": path.is_file(),
         "dimensions": dimensions,
@@ -1127,6 +1201,13 @@ def validate_poster(path: Path, task: PosterTask, compose_meta: dict[str, Any]) 
         "nonblank": nonblank,
         "figure_1_upper_right": compose_meta["figure_1_box"][0] > W * 0.72 and compose_meta["figure_1_box"][1] < H * 0.16,
         "figure_1_fixed_source_asset": bool(compose_meta.get("figure_1_fixed_source_asset")),
+        "background_2048x2560": background_size == (W, H),
+        "foreground_rgba_2048x2560": foreground_size == (W, H) and foreground_alpha is not None,
+        "channel_icons_deterministic": bool(compose_meta.get("channel_icons_deterministic")),
+        "channel_icons_in_bounds": all(
+            isinstance(box, list) and len(box) == 4 and 0 <= box[0] < box[2] <= W and 0 <= box[1] < box[3] <= H
+            for box in icon_boxes
+        ),
         "pt_br_copy_deterministic": True,
         "score_deterministic": True,
         "crests_deterministic": True,
@@ -1192,7 +1273,7 @@ def run_phase3(
         try:
             provider, attempts = generate_image2(task, raw_path, max_attempts)
             if task.kind == "single":
-                compose_meta = compose_single(raw_path, task, poster_path, figure_path)
+                compose_meta = compose_single(raw_path, task, poster_path, figure_path, channel_dir)
             else:
                 compose_meta = compose_summary(raw_path, task, poster_path, figure_path, channel_dir, target_date)
             validation = validate_poster(poster_path, task, compose_meta)
@@ -1217,6 +1298,8 @@ def run_phase3(
                 "image2_model": "gpt-image-2",
                 "generation_attempts": attempts,
                 "raw_path": str(raw_path.resolve()),
+                "background_path": compose_meta["background_path"],
+                "foreground_path": compose_meta["foreground_path"],
                 "poster_path": str(poster_path.resolve()),
                 "qa_path": str(qa_path.resolve()),
                 "sha256": validation["sha256"],
@@ -1237,7 +1320,7 @@ def run_phase3(
                 "poster_count": len(outputs),
                 "posters": outputs,
                 "failed": failures,
-                "fallback_used": any(item["image2_provider"] == "active-large-model-api" for item in outputs),
+                "fallback_used": any(item["image2_provider"] == "apimart" for item in outputs),
             },
         )
 

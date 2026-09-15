@@ -21,9 +21,9 @@
     "cross_check_official_site": true
   },
   "image2": {
-    "primary_provider": "apimart",
+    "primary_provider": "active-large-model-api",
     "primary_model": "gpt-image-2",
-    "secondary_provider": "active-large-model-api",
+    "secondary_provider": "apimart",
     "max_attempts_per_poster": 3
   },
   "reasoning": {
@@ -52,7 +52,7 @@
     "hook_seconds": 4,
     "max_generation_attempts": 2,
     "final_duration": "dynamic_sum_of_full_segments",
-    "first_frame_and_cover": "complete-uncropped-poster-master",
+    "first_frame_and_cover": "locked-foreground-over-background-only-motion",
     "filename_language": "zh-CN",
     "filename_source": "validated-poster-filename"
   },

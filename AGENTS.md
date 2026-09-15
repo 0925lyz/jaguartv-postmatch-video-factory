@@ -19,13 +19,15 @@ These rules apply to every task and automation in this repository.
 
 ## Image, video, and voice routing
 
-- Poster generation uses APIMart Image2 first and the active large-model API `gpt-image-2` route only after APIMart fails.
+- Poster generation uses the configured active large-model API `gpt-image-2` route first and APIMart only as the explicit secondary service.
 - Record every provider fallback; never substitute providers silently.
 - The upper-right brand mark must always be the exact Figure 1 JaguarTV logo image. Never let
   Image2, Dreamina, or a compositor redraw, restyle, recolor, replace, morph, or distort it.
 - Video generation uses the operator's authenticated Dreamina/Jimeng VIP Seedance 2.0 Fast 720p
   route first. If it is unavailable or a generation fails, use APIMart `wan2.6-i2v-flash` at
   720p for 4 seconds and record the fallback.
+- Select exactly half of each poster batch deterministically for background-only motion; odd batches
+  drop one deterministic motion candidate. Every remaining poster uses a local static 4-second hook.
 - Generate exactly the opening 4-second poster hook. Both middle operation clips and the motion
   CTA must be selected from existing authorized inventory and played in full. Final duration is
   the dynamic sum of those segments, not a fixed 12 seconds.

@@ -31,7 +31,7 @@
 - 密钥只能由仓库的 `env_or_keychain()` 从环境变量或 macOS Keychain 读取。不得记忆、粘贴、打印、写入文件或放入命令参数。
 - preflight 必须检查 `API_FOOTBALL_KEY`、`APIMART_API_KEY`、`JAGUARTV_DASHBOARD_URL`、`JAGUARTV_UPLOAD_TOKEN`、`JAGUARTV_DASHBOARD_TOKEN`、Dreamina/Jimeng VIP 登录态、agent-reach、FFmpeg/ffprobe、Figure 1、队徽和频道图标、上传器。只能报“可用/不可用”，不得显示值。
 - 如果主路由不可用但仓库规定的后备路由可用，可按仓库继续并在 manifest 记录 fallback。主路由和后备路由都不可用时必须停止。
-- 不得自行更换 Image2 或视频模型。海报：APIMart Image2 主路由，当前大模型 API `gpt-image-2` 后备。动态钩子：Dreamina/Jimeng VIP Seedance 2.0 Fast 720p 主路由，APIMart `wan2.6-i2v-flash` 720p/4s 后备。
+- 不得自行更换 Image2 或视频模型。海报：当前大模型 API `gpt-image-2` 主路由，APIMart Image2 为明确的次级路由。动态钩子：Dreamina/Jimeng VIP Seedance 2.0 Fast 720p 主路由，APIMart `wan2.6-i2v-flash` 720p/4s 后备。
 
 【禁止本地赛事采集器】
 - 赛后比分的主数据源只能是 API-Football。`copa.jarg.top` 只用于 Task 1 频道/来源页交叉核验。

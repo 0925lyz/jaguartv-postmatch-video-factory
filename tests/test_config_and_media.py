@@ -67,7 +67,7 @@ def test_config_rejects_wrong_server_label(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_preflight_reports_apimart_primary_and_active_api_fallback(
+def test_preflight_reports_active_api_primary_and_apimart_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = {
@@ -82,16 +82,14 @@ def test_preflight_reports_apimart_primary_and_active_api_fallback(
     monkeypatch.setattr("jaguartv_postmatch.pipeline._credential_available", lambda name: name == "APIMART_API_KEY")
     monkeypatch.setattr("jaguartv_postmatch.pipeline._research_connectivity", lambda: {})
     report = preflight(config)
-    assert report["checks"]["image2_primary"]["provider"] == "apimart"
-    assert report["checks"]["image2_fallback"]["provider"] == "active-large-model-api"
+    assert report["checks"]["image2_primary"]["provider"] == "active-large-model-api"
+    assert report["checks"]["image2_fallback"]["provider"] == "apimart"
     assert report["checks"]["image2_route"]["available"] is True
 
 
 def test_preflight_reports_dreamina_primary_and_apimart_video_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    script = tmp_path / "generate-apimart-video.mjs"
-    script.write_text("", encoding="utf-8")
     config = {
         key: str(tmp_path)
         for key in (
@@ -100,7 +98,7 @@ def test_preflight_reports_dreamina_primary_and_apimart_video_fallback(
             "runtime_root",
         )
     }
-    config["video"] = {"apimart_script": str(script)}
+    config["video"] = {}
     config["result_sources"] = {"api_football_required": False}
     monkeypatch.setattr("jaguartv_postmatch.pipeline._credential_available", lambda name: name == "APIMART_API_KEY")
     monkeypatch.setattr("jaguartv_postmatch.pipeline._research_connectivity", lambda: {})

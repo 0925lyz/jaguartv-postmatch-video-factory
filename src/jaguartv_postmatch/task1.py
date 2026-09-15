@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .credentials import env_or_keychain
+from .competition import competition_kind
 from .util import canonical_team, parse_manifest_time, parse_pt_br_manifest_date, stable_json_hash
 
 
@@ -33,9 +34,20 @@ class Task1Fixture:
     away_crest: str
     source_manifest: str
     pre_match_poster: str
+    selection_reason: str = "upstream_task1"
+    league_id: int | None = None
+    league_country: str = ""
+    competition_kind: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _composite_key(match_date: str, competition: str, home: str, away: str) -> str:
@@ -279,7 +291,7 @@ def _load_from_prematch_runs(
                     (
                         value
                         for key, value in posters.items()
-                        if key == fixture_id or key.endswith("-" + fixture_id) or fixture_id in key
+                        if key == fixture_id or key.endswith("-" + fixture_id)
                     ),
                     "",
                 )
@@ -317,6 +329,12 @@ def _load_from_prematch_runs(
                 away_crest=away_crest,
                 source_manifest=str(source_manifest.resolve()),
                 pre_match_poster=poster,
+                selection_reason=str(entry.get("selection_reason") or "upstream_task1"),
+                league_id=_optional_int(entry.get("league_id")),
+                league_country=str(entry.get("league_country") or ""),
+                competition_kind=competition_kind(
+                    entry.get("league_id"), competition, str(entry.get("league_country") or "")
+                ),
             )
     fixtures = list(fixtures_by_id.values())
     return sorted(fixtures, key=lambda fixture: (fixture.kickoff_brt, fixture.task1_fixture_id))

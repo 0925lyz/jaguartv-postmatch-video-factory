@@ -61,6 +61,11 @@ def load_config(path: Path) -> dict[str, Any]:
     server = payload.get("server") or {}
     if server.get("category") != "post_match_score" or server.get("label") != "赛后比分":
         raise ValueError("server target must be Pending Review label 赛后比分")
+    image2 = payload.get("image2") or {}
+    if image2.get("primary_provider") != "active-large-model-api" or image2.get("primary_model") != "gpt-image-2":
+        raise ValueError("Image2 primary must be active-large-model-api/gpt-image-2")
+    if image2.get("secondary_provider") != "apimart":
+        raise ValueError("Image2 secondary must be the explicit APIMart route")
     return payload
 
 
@@ -154,22 +159,15 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
         "order": ["agent_reach_exa", "agent_reach_x"],
     }
     video_config = config.get("video") or {}
-    apimart_video_script = Path(
-        str(
-            video_config.get("apimart_script")
-            or _path(config, "jaguartv_v7_pack") / "scripts" / "generate-apimart-video.mjs"
-        )
-    ).expanduser().resolve()
     checks["video_primary"] = {
         "available": shutil.which("dreamina") is not None,
         "provider": "dreamina-vip",
         "model": video_config.get("model", "seedance2.0fast_vip"),
     }
     checks["video_fallback"] = {
-        "available": _credential_available("APIMART_API_KEY") and apimart_video_script.is_file(),
+        "available": _credential_available("APIMART_API_KEY"),
         "provider": "apimart",
         "model": video_config.get("fallback_model", "wan2.6-i2v-flash"),
-        "script": str(apimart_video_script),
     }
     checks["video_route"] = {
         "available": checks["video_primary"]["available"] or checks["video_fallback"]["available"],
@@ -182,18 +180,18 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
         "text_model": (config.get("reasoning") or {}).get("primary_model", "current-task"),
     }
     checks["image2_primary"] = {
-        "available": _credential_available("APIMART_API_KEY"),
-        "model": "gpt-image-2",
-        "provider": "apimart",
-    }
-    checks["image2_fallback"] = {
         "available": (Path.home() / ".codex" / "auth.json").is_file(),
         "model": "gpt-image-2",
         "provider": "active-large-model-api",
     }
+    checks["image2_fallback"] = {
+        "available": _credential_available("APIMART_API_KEY"),
+        "model": "gpt-image-2",
+        "provider": "apimart",
+    }
     checks["image2_route"] = {
         "available": checks["image2_primary"]["available"] or checks["image2_fallback"]["available"],
-        "order": ["apimart", "active-large-model-api"],
+        "order": ["active-large-model-api", "apimart"],
     }
     checks["task1_store"] = {
         "available": (_path(config, "collector_root") / ".runtime/retention/fixtures.db").is_file()

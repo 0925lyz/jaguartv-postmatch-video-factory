@@ -17,7 +17,8 @@ from typing import Any
 from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 from .credentials import env_or_keychain
-from .util import codex_model_args, normalize_name, postmatch_run_dir, utc_now
+from .retry import _write_state, retry_forever
+from .util import codex_model_args, deterministic_motion_plan, normalize_name, postmatch_run_dir, utc_now
 from .util import sanitize_filename_part
 from .voice import prepare_voice_rotation
 
@@ -179,19 +180,33 @@ def cta_rotation_state(
     return next_index, state_path
 
 
-def _master_from_poster(poster_path: Path, output: Path) -> dict[str, Any]:
-    poster = ImageOps.exif_transpose(Image.open(poster_path)).convert("RGB")
-    if poster.size != (2048, 2560):
-        raise RuntimeError(f"Unexpected source poster dimensions: {poster.size}")
-    background = ImageOps.fit(poster, (W, H), method=Image.Resampling.LANCZOS)
+def _master_from_layers(
+    background_path: Path, foreground_path: Path, output: Path,
+    background_output: Path, foreground_output: Path,
+) -> dict[str, Any]:
+    poster_background = ImageOps.exif_transpose(Image.open(background_path)).convert("RGB")
+    poster_foreground = ImageOps.exif_transpose(Image.open(foreground_path)).convert("RGBA")
+    if poster_background.size != (2048, 2560) or poster_foreground.size != (2048, 2560):
+        raise RuntimeError(f"Unexpected poster layer dimensions: {poster_background.size}, {poster_foreground.size}")
+    background = ImageOps.fit(poster_background, (W, H), method=Image.Resampling.LANCZOS)
     background = background.filter(ImageFilter.GaussianBlur(42))
-    background = Image.blend(background, Image.new("RGB", (W, H), (3, 8, 10)), 0.33)
-    contained = poster.resize((W, 1350), Image.Resampling.LANCZOS)
-    y = (H - contained.height) // 2
-    background.paste(contained, (0, y))
+    background = Image.blend(background, Image.new("RGB", (W, H), (3, 8, 10)), 0.33).convert("RGBA")
+    contained = poster_background.resize((W, 1350), Image.Resampling.LANCZOS)
+    locked = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    locked.alpha_composite(poster_foreground.resize((W, 1350), Image.Resampling.LANCZOS), (0, 285))
+    background.alpha_composite(contained.convert("RGBA"), (0, 285))
+    master = background.copy()
+    master.alpha_composite(locked)
     output.parent.mkdir(parents=True, exist_ok=True)
-    background.save(output, "PNG", optimize=True)
-    return {"source_poster_size": [2048, 2560], "master_size": [W, H], "poster_box": [0, y, W, y + contained.height], "cropped": False}
+    background.convert("RGB").save(background_output, "PNG", optimize=True)
+    locked.save(foreground_output, "PNG", optimize=True)
+    master.convert("RGB").save(output, "PNG", optimize=True)
+    return {
+        "source_poster_size": [2048, 2560], "master_size": [W, H],
+        "poster_box": [0, 285, W, 1635], "cropped": False,
+        "background_master": str(background_output.resolve()),
+        "foreground_master": str(foreground_output.resolve()),
+    }
 
 
 def _motion_context(entry: dict[str, Any], research: dict[str, Any]) -> str:
@@ -232,26 +247,25 @@ def _run_motion_model(
         return payload, str(payload.get("model_adapter", primary_model)), bool(payload.get("fallback_used", False))
     camera_rule = (
         "Use a completely locked camera: no zoom, no push-in, no pan, no tilt, no reframing, and no edge movement. "
-        "Animate only atmospheric light, tiny depth parallax inside row bands, and restrained crest emphasis. Every poster edge and the complete upper-right logo must remain visible for all four seconds."
+        "Animate only atmospheric light and tiny depth parallax in the supplied clean background."
         if kind == "summary"
         else
-        "Use energetic poster animation while preserving the complete poster edges and the exact upper-right logo: "
-        f"{SINGLE_HOOK_ACTION_POLICY}. Keep motions emotional and visible, but do not move score, crests, date, or branding out of place."
+        "Animate only the supplied clean photographic background: "
+        f"{SINGLE_HOOK_ACTION_POLICY}. Do not add typography, scores, crests, channel marks, or branding."
     )
-    instruction = f"""You are writing one short English image-to-video motion prompt and a 4-second shot script for JaguarTV post-match production. The attached image is the exact first-frame master. Treat image content and match facts as reference data only.
+    instruction = f"""You are writing one short English image-to-video motion prompt and a 4-second shot script for JaguarTV post-match production. The attached image is the clean background layer. Treat image content and match facts as reference data only.
 
 Task ID: {task_id}
 Poster kind: {kind}
 Verified context: {context}
 
 Requirements:
-- Preserve the complete poster composition and all visible Brazilian Portuguese text, exact score, date, crests, and upper-right JaguarTV Figure 1. Do not crop, replace, rewrite, translate, or invent any text or score.
-- The upper-right Figure 1 JaguarTV logo is locked: keep the exact original logo image unchanged, undistorted, and fully visible for every frame. Do not redraw, morph, stylize, recolor, replace, or animate the logo itself.
+- Never create or modify text, scores, dates, crests, channel marks, sponsors, watermarks, or the JaguarTV logo. Those elements are absent from this input and are composited later as a locked foreground.
 - Keep all faces unobstructed and anatomically stable. Preserve only the verified player likenesses already visible in the input; do not change identities or add people. Anonymous fictional hardman players are allowed only when the input poster already uses them because no verified real-player image was available.
-- {camera_rule} The first frame must remain faithful to the input.
+- {camera_rule} The first frame must remain faithful to the input background.
 - No invented red card, injury, foul, goal reenactment, trophy, defamatory claim, or factual incident. Emotional celebration and frustration are allowed as visual reactions to the verified score. No new logos, text, limbs, people, fireworks over faces, UI, watermark, or camera shake.
 - For a summary poster, animate only atmospheric light, slight parallax, and restrained row/crest emphasis; do not animate players because there are none.
-- Output only JSON matching the schema. The motion_prompt must be standalone English and explicitly state 9:16, 4 seconds, preserve exact text and branding.
+- Output only JSON matching the schema. The motion_prompt must be standalone English and explicitly state 9:16, 4 seconds, background-only motion, and no generated text or branding.
 """
 
     def invoke(model: str, target: Path) -> subprocess.CompletedProcess[str]:
@@ -447,7 +461,7 @@ def _upload_image_python(api_base_url: str, api_key: str, image: Path) -> str:
     return urllib.parse.quote(image_url, safe=":/?#[]@!$&'()*+,;=%")
 
 
-def _wait_apimart_task_python(api_base_url: str, api_key: str, task_id: str, timeout_seconds: int = 900) -> dict[str, Any]:
+def _wait_apimart_task_python(api_base_url: str, api_key: str, task_id: str, timeout_seconds: int = 900, state_path: Path | None = None) -> dict[str, Any]:
     deadline = time.time() + timeout_seconds
     last_status = ""
     while time.time() < deadline:
@@ -465,6 +479,8 @@ def _wait_apimart_task_python(api_base_url: str, api_key: str, task_id: str, tim
         if status == "completed":
             return task or {}
         if status in {"failed", "cancelled"}:
+            if state_path:
+                _write_state(state_path, {"provider_task_id": "", "provider_task_status": status})
             raise RuntimeError(f"APIMart task failed: {task}")
         time.sleep(8)
     raise TimeoutError(f"APIMart task timed out: {task_id}")
@@ -500,17 +516,17 @@ def _apimart_safe_prompt(prompt: str) -> str:
     if len(base) > 1200:
         base = base[:1200].rsplit(" ", 1)[0]
     return (
-        "Create a safe sports-broadcast 9:16 image-to-video animation for exactly 4 seconds. "
-        "Use the supplied poster as the exact first frame. Preserve the complete poster edges, all visible text, score, date, crests, player identities, and the upper-right JaguarTV logo unchanged and fully readable. "
+        "Create a safe sports-broadcast 9:16 background-only image-to-video animation for exactly 4 seconds. "
+        "Use the supplied clean background as the exact first frame. "
         "Animate only subtle stadium lights, crowd depth, soft atmospheric haze, cloth movement, and restrained winning/losing post-match emotion. Keep faces clear and anatomy stable. "
-        "Do not add new people, new text, new logos, watermarks, camera shake, cropping, or factual incidents. "
+        "Do not add new people, text, scores, crests, channel marks, logos, watermarks, camera shake, cropping, or factual incidents. Locked foreground is added later. "
         f"Reference intent: {base}"
     )
 
 
 
 def _generate_apimart_video_python(
-    config: dict[str, Any], master: Path, prompt: str, output: Path,
+    config: dict[str, Any], master: Path, prompt: str, output: Path, state_path: Path,
 ) -> dict[str, Any]:
     video_config = config.get("video") or {}
     key = env_or_keychain("APIMART_API_KEY")
@@ -518,39 +534,38 @@ def _generate_apimart_video_python(
     resolution = str(video_config.get("fallback_resolution") or "720p")
     provider_resolution = resolution.upper()
     configured_duration = int(video_config.get("fallback_duration") or 4)
-    provider_duration = max(configured_duration, 5)
+    provider_duration = configured_duration
     configured_base = str(os.environ.get("APIMART_BASE_URL") or "https://api.apimart.ai/v1").rstrip("/")
     api_base_url = configured_base if configured_base.endswith("/v1") else f"{configured_base}/v1"
-    image_url = _upload_image_python(api_base_url, key, master)
-    payload_base = {
-        "model": model,
-        "duration": provider_duration,
-        "resolution": provider_resolution,
-        "generation_type": "reference",
-        "image_urls": [image_url],
-    }
-    task_id = ""
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+    task_id = str(state.get("provider_task_id") or "")
     task = None
     prompt_used = prompt
     safe_prompt_used = False
-    for attempt_prompt in (prompt, _apimart_safe_prompt(prompt)):
+    for attempt_prompt in ((prompt,) if task_id else (prompt, _apimart_safe_prompt(prompt))):
         safe_prompt_used = attempt_prompt != prompt
         prompt_used = attempt_prompt
-        submission = _request_json_python(
-            f"{api_base_url}/videos/generations",
-            key,
-            {**payload_base, "prompt": attempt_prompt},
-            timeout=60,
-        )
-        task_id = str(((submission.get("data") or [{}])[0] or {}).get("task_id") or "")
         if not task_id:
-            raise RuntimeError("APIMart video submission did not contain task_id")
+            image_url = _upload_image_python(api_base_url, key, master)
+            submission = _request_json_python(
+                f"{api_base_url}/videos/generations", key,
+                {
+                    "model": model, "duration": provider_duration,
+                    "resolution": provider_resolution, "generation_type": "reference",
+                    "image_urls": [image_url], "prompt": attempt_prompt,
+                }, timeout=60,
+            )
+            task_id = str(((submission.get("data") or [{}])[0] or {}).get("task_id") or "")
+            if not task_id:
+                raise RuntimeError("APIMart video submission did not contain task_id")
+            _write_state(state_path, {"provider_task_id": task_id, "provider_task_status": "polling"})
         try:
-            task = _wait_apimart_task_python(api_base_url, key, task_id)
+            task = _wait_apimart_task_python(api_base_url, key, task_id, state_path=state_path)
             break
         except RuntimeError as error:
             if "内容安全系统拒绝" in str(error) and not safe_prompt_used:
                 print(f"[apimart-python] {task_id} content-safety retry with safe prompt", flush=True)
+                task_id = ""
                 continue
             raise
     if task is None:
@@ -561,6 +576,7 @@ def _generate_apimart_video_python(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(data)
     if output.stat().st_size < 20_000:
+        _write_state(state_path, {"provider_task_id": "", "provider_task_status": "invalid_download"})
         raise RuntimeError("APIMart downloaded video is too small")
     return {
         "provider": "apimart-python",
@@ -580,65 +596,47 @@ def _generate_apimart_video_python(
 def _generate_apimart_video(
     config: dict[str, Any], v7: Path, master: Path, prompt: str, output: Path,
 ) -> dict[str, Any]:
-    video_config = config.get("video") or {}
-    script = Path(
-        str(video_config.get("apimart_script") or v7 / "scripts" / "generate-apimart-video.mjs")
-    ).expanduser().resolve()
-    if not script.is_file():
-        raise FileNotFoundError(f"APIMart video script is missing: {script}")
-    key = env_or_keychain("APIMART_API_KEY")
-    model = str(video_config.get("fallback_model") or "wan2.6-i2v-flash")
-    resolution = str(video_config.get("fallback_resolution") or "720p")
-    duration = int(video_config.get("fallback_duration") or 4)
-    environment = {
-        **os.environ,
-        "APIMART_API_KEY": key,
-        "APIMART_BASE_URL": str(os.environ.get("APIMART_BASE_URL") or "https://api.apimart.ai/v1"),
-    }
-    completed = subprocess.run(
-        [
-            "node", str(script), "--model", model, "--image", str(master),
-            "--prompt", prompt, "--duration", str(duration), "--resolution", resolution,
-            "--aspect-ratio", "9:16", "--output", str(output),
-        ],
-        text=True, capture_output=True, env=environment, timeout=1200, check=False,
+    del v7
+    state_path = output.with_suffix(".apimart-retry.json")
+    return retry_forever(
+        lambda: _generate_apimart_video_python(config, master, prompt, output, state_path),
+        state_path=state_path, operation_name=f"video:{output.stem}",
     )
-    if completed.returncode != 0 or not output.is_file() or output.stat().st_size < 20_000:
-        detail = re.sub(
-            r"(?:sk-|Bearer\s+)[A-Za-z0-9._-]+", "[credential redacted]",
-            completed.stderr or completed.stdout or "APIMart video generation failed",
-        )[-900:]
-        if "fetch failed" in detail:
-            return _generate_apimart_video_python(config, master, prompt, output)
-        raise RuntimeError(detail)
-    return {
-        "provider": "apimart",
-        "model": model,
-        "resolution": resolution,
-        "duration": duration,
-        "fallback_used": True,
-        "completed_at": utc_now(),
-    }
 
 
-def _make_exact_hook(master: Path, dreamina_video: Path, output: Path) -> None:
+def _make_exact_hook(master: Path, dreamina_video: Path, foreground: Path, output: Path) -> None:
     subprocess.run(
         [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-loop", "1", "-framerate", "30", "-t", "0.10", "-i", str(master),
-            "-loop", "1", "-framerate", "30", "-t", "4.00", "-i", str(master),
             "-i", str(dreamina_video),
+            "-loop", "1", "-framerate", "30", "-t", "4.00", "-i", str(foreground),
             "-filter_complex",
             "[0:v]scale=1080:1920,setsar=1,trim=duration=0.10,setpts=PTS-STARTPTS[first];"
-            "[1:v]scale=1080:1920,setsar=1,crop=1080:1350:0:285,trim=duration=3.90,setpts=PTS-STARTPTS[poster];"
-            "[2:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,gblur=sigma=34,trim=start=0.10:end=4.00,setpts=PTS-STARTPTS[ambient];"
-            "[ambient][poster]overlay=0:285:shortest=1[exact];"
+            "[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,trim=start=0.10:end=4.00,setpts=PTS-STARTPTS[ambient];"
+            "[2:v]format=rgba,trim=duration=3.90,setpts=PTS-STARTPTS[foreground];"
+            "[ambient][foreground]overlay=0:0:format=auto[exact];"
             "[first][exact]concat=n=2:v=1:a=0[out]",
             "-map", "[out]", "-t", "4", "-r", "30", "-c:v", "libx264", "-preset", "medium",
             "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
         ],
         capture_output=True, timeout=240, check=True,
     )
+
+
+def _make_static_hook(master: Path, output: Path) -> None:
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", "30", "-i", str(master), "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output)],
+        capture_output=True, timeout=120, check=True,
+    )
+
+
+def _locked_foreground_rms(master: Path, frame: Path, foreground: Path) -> float:
+    first = Image.open(master).convert("RGB")
+    second = Image.open(frame).convert("RGB").resize(first.size, Image.Resampling.LANCZOS)
+    mask = Image.open(foreground).convert("RGBA").getchannel("A")
+    stat = ImageStat.Stat(ImageChops.difference(first, second), mask=mask)
+    return math.sqrt(sum(value * value for value in stat.rms) / len(stat.rms))
 
 
 def _compose_full_inventory(
@@ -697,13 +695,6 @@ def _extract_frame(video: Path, at: float, output: Path) -> None:
 def _rms_difference(a: Path, b: Path) -> float:
     first = Image.open(a).convert("RGB").resize((270, 480), Image.Resampling.LANCZOS)
     second = Image.open(b).convert("RGB").resize((270, 480), Image.Resampling.LANCZOS)
-    stat = ImageStat.Stat(ImageChops.difference(first, second))
-    return math.sqrt(sum(value * value for value in stat.rms) / len(stat.rms))
-
-
-def _poster_region_rms(a: Path, b: Path) -> float:
-    first = Image.open(a).convert("RGB").crop((0, 285, 1080, 1635)).resize((270, 338), Image.Resampling.LANCZOS)
-    second = Image.open(b).convert("RGB").crop((0, 285, 1080, 1635)).resize((270, 338), Image.Resampling.LANCZOS)
     stat = ImageStat.Stat(ImageChops.difference(first, second))
     return math.sqrt(sum(value * value for value in stat.rms) / len(stat.rms))
 
@@ -811,6 +802,8 @@ def _phase4_entries(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, dict
                 "task_id": poster["task_id"],
                 "kind": poster["kind"],
                 "poster_path": poster["poster_path"],
+                "background_path": poster["background_path"],
+                "foreground_path": poster["foreground_path"],
                 "prompt_path": poster["prompt_path"],
                 "results": [result_by_id[task_id] for task_id in poster["match_ids"]],
             }
@@ -831,6 +824,9 @@ def run_phase4(
         directory.mkdir(parents=True, exist_ok=True)
 
     entries, research_by_id = _phase4_entries(run_dir)
+    motion_plan = deterministic_motion_plan(
+        [entry["task_id"] for entry in entries], f"{target_date.isoformat()}:{batch_id or 'default'}"
+    )
     schema_path = phase4_dir / "motion-prompt.schema.json"
     _write_json(schema_path, MOTION_SCHEMA)
     v7 = Path(str(config["jaguartv_v7_pack"])).resolve()
@@ -886,36 +882,47 @@ def run_phase4(
         names = video_filenames(entry["poster_path"], source_seconds, entry["sequence"])
         media_stem = names["media_stem"]
         master = output_dir / names["master"]
-        master_meta = _master_from_poster(Path(entry["poster_path"]), master)
+        background_master = output_dir / f"{media_stem}_背景母版_1080x1920.png"
+        foreground_master = output_dir / f"{media_stem}_锁定前景_1080x1920.png"
+        master_meta = _master_from_layers(
+            Path(entry["background_path"]), Path(entry["foreground_path"]), master,
+            background_master, foreground_master,
+        )
         research = research_by_id[entry["results"][0]["task1_fixture_id"]] if entry["kind"] == "single" else {}
         context = _motion_context(entry, research)
         motion_path = prompt_dir / f"{task_id}_motion.json"
-        motion, prompt_model, fallback = _run_motion_model(
-            master, task_id, entry["kind"], context, motion_path, schema_path,
-            primary_model, fallback_model, reasoning_effort, model_provider,
-        )
+        selected_for_motion = motion_plan[task_id]["dynamic"]
+        if selected_for_motion:
+            motion, prompt_model, fallback = _run_motion_model(
+                background_master, task_id, entry["kind"], context, motion_path, schema_path,
+                primary_model, fallback_model, reasoning_effort, model_provider,
+            )
+        else:
+            motion, prompt_model, fallback = ({"motion_prompt": "", "shot_script": []}, "none", False)
         raw_video = raw_dir / names["raw_video"]
         submit_record_path = raw_dir / f"{task_id}_submit.json"
-        if raw_video.is_file() and _probe(raw_video)["duration"] >= 3.5:
+        if not selected_for_motion:
+            submit = {"provider": "static-local", "model": "none", "fallback_used": False, "status": "not_called"}
+        elif raw_video.is_file() and _probe(raw_video)["duration"] >= 3.5:
             submit = json.loads(submit_record_path.read_text(encoding="utf-8")) if submit_record_path.is_file() else {
                 "provider": "existing-local-artifact", "reused_idempotently": True,
             }
         else:
             try:
                 submit = {
-                    **_submit_dreamina(master, motion["motion_prompt"], model, resolution, source_seconds),
+                    **_submit_dreamina(background_master, motion["motion_prompt"], model, resolution, source_seconds),
                     "provider": "dreamina-vip", "model": model, "resolution": resolution,
                     "duration": source_seconds, "fallback_used": False,
                 }
                 states[task_id] = {
                     "submit": submit, "download_dir": raw_dir / task_id, "raw_video": raw_video,
-                    "master": master, "prompt": motion["motion_prompt"],
+                    "master": background_master, "prompt": motion["motion_prompt"],
                     "submit_record_path": submit_record_path,
                 }
             except Exception as dreamina_error:  # noqa: BLE001
                 try:
                     submit = {
-                        **_generate_apimart_video(config, v7, master, motion["motion_prompt"], raw_video),
+                        **_generate_apimart_video(config, v7, background_master, motion["motion_prompt"], raw_video),
                         "dreamina_error": f"{type(dreamina_error).__name__}: unavailable",
                     }
                 except Exception as fallback_error:  # noqa: BLE001
@@ -953,6 +960,9 @@ def run_phase4(
             "poster": entry["poster_path"],
             "master": str(master.resolve()),
             "master_layout": master_meta,
+            "background_master": str(background_master.resolve()),
+            "foreground_master": str(foreground_master.resolve()),
+            "motion_selection": motion_plan[task_id],
             "motion_prompt_path": str(motion_path.resolve()),
             "motion_prompt": motion["motion_prompt"],
             "shot_script": motion["shot_script"],
@@ -983,7 +993,7 @@ def run_phase4(
             "seed": None,
             "seed_note": "The selected video provider did not expose a seed; no seed was fabricated.",
             "submit": submit,
-            "raw_video": str(raw_video.resolve()),
+            "raw_video": str(raw_video.resolve()) if selected_for_motion else "",
             "interface_operation": operation_name,
             "middle_segments": [str(first_module.resolve()), str(second_module.resolve())],
             "cta": str(cta_path.resolve()),
@@ -1045,14 +1055,19 @@ def run_phase4(
     for item in manifest_items:
         task_id = item["task_id"]
         names = video_filenames(item["poster"], source_seconds, item.get("sequence"))
-        raw_video = Path(item["raw_video"])
-        if not raw_video.is_file():
+        selected_for_motion = bool(item["motion_selection"]["dynamic"])
+        raw_video = Path(item["raw_video"]) if selected_for_motion else None
+        if selected_for_motion and (raw_video is None or not raw_video.is_file()):
             raise FileNotFoundError(f"Generated poster-hook video is missing for {task_id}")
         hook = output_dir / names["hook"]
         final = output_dir / names["final"]
         cover = output_dir / names["cover"]
         master = Path(item["master"])
-        _make_exact_hook(master, raw_video, hook)
+        foreground_master = Path(item["foreground_master"])
+        if selected_for_motion:
+            _make_exact_hook(master, raw_video, foreground_master, hook)
+        else:
+            _make_static_hook(master, hook)
         Image.open(master).convert("RGB").save(cover, "JPEG", quality=95, subsampling=0)
         assembly_timing = _compose_full_inventory(
             hook,
@@ -1070,7 +1085,7 @@ def run_phase4(
         cover_rms = _rms_difference(master, cover)
         first_cover_rms = _rms_difference(cover, first_frame)
         motion_rms = _rms_difference(first_frame, moving_frame)
-        poster_region_rms = _poster_region_rms(master, moving_frame)
+        foreground_rms = _locked_foreground_rms(master, moving_frame, foreground_master)
         combination = (item["interface_operation"], Path(item["cta"]).name, Path(item["music"]).name, tuple(Path(path).name for path in item["middle_segments"]))
         duplicate = combination in combinations
         combinations.add(combination)
@@ -1092,9 +1107,11 @@ def run_phase4(
             "first_frame_matches_video_cover": first_cover_rms < 18.0,
             "first_frame_and_cover_source": "complete uncropped poster master",
             "hook_motion_rms": round(motion_rms, 3),
-            "hook_is_dynamic": motion_rms > 1.0,
-            "poster_region_rms_at_2s": round(poster_region_rms, 3),
-            "poster_facts_stable_at_2s": poster_region_rms < 18.0,
+            "expected_dynamic": selected_for_motion,
+            "hook_is_dynamic": motion_rms > 1.0 if selected_for_motion else motion_rms < 1.0,
+            "video_model_call_policy_ok": item["motion_selection"]["video_model_called"] == selected_for_motion,
+            "locked_foreground_rms_at_2s": round(foreground_rms, 3),
+            "poster_facts_stable_at_2s": foreground_rms < 20.0,
             "component_combination_duplicate": duplicate,
             "no_duplicate_combination": not duplicate,
         }
@@ -1103,7 +1120,7 @@ def run_phase4(
                 "master_1080x1920", "poster_fully_visible", "hook_4_seconds", "final_duration_matches_inventory",
                 "final_1080x1920", "first_frame_faithful", "cover_is_complete_poster_master",
                 "first_frame_matches_video_cover", "hook_is_dynamic", "no_duplicate_combination",
-                "poster_facts_stable_at_2s",
+                "poster_facts_stable_at_2s", "video_model_call_policy_ok",
             )
         )
         qa_path = qa_dir / f"{task_id}_qa.json"

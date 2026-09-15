@@ -6,7 +6,7 @@ This file is the persistent project-level production profile for JaguarTV footba
 
 These are the user's explicit standing rules and take precedence over any conflicting default below.
 
-- **Image2 routing**: call APIMart Image2 (`gpt-image-2`) first. Only after that route fails, call the active large-model API's configured `gpt-image-2` route and record the fallback in the manifest. Do not substitute a different image model.
+- **Image2 routing**: call the active large-model API's configured `gpt-image-2` route first. APIMart Image2 is the explicit secondary route. Record both attempts and never substitute a different provider or model.
 - **No relative dates**: never use `HOJE` or relative date wording. Always show the specific Brasília calendar date, including the year.
 - **Emphasize both team crests**: both official team crests must be prominent and clearly mapped beside the central `VS` / result. Never place a crest, badge, logo, text, or panel on top of a player's head, face, hair, or silhouette.
 - **Real player imagery**: when player portraits are used, select the two biggest stars from the predicted starting lineup in current verified kits, and keep their heads/faces fully clear of any overlay.
@@ -23,7 +23,7 @@ These are the user's explicit standing rules and take precedence over any confli
 2. Validate and normalize match ID, competition, teams, Brasília date/time, channels, score prediction, model probabilities, tactical takeaways, lineup caveats, and source path.
 3. Keep match mappings isolated in a production manifest.
 4. Feed the verified post-match research into the current task text model and create one complete English, match-specific Image2 production prompt per match before image generation.
-5. Make one distinct APIMart `gpt-image-2` call per match; use the active large-model API `gpt-image-2` route only after APIMart fails. Never reuse one generic background across matches.
+5. Make one distinct active large-model API `gpt-image-2` call per match; use APIMart only after the primary route fails. Never reuse one generic background across matches.
 6. Use exact official crest and brand assets from `image2数据库` first; inspect assets rather than trusting filenames.
 7. Render exact text, crests, and brand assets deterministically only as a fidelity layer on top of a successful Image2-generated poster composition. Programmatic layout, flat panels, or heavy masking must never substitute for Image2 visual design.
 8. Perform full-resolution visual QA and targeted corrections before delivery.
@@ -51,7 +51,7 @@ These rules apply specifically to completed-match `PLACAR FINAL` / `FIM DE JOGO`
 - Do not show channel names, kickoff time, or `HORÁRIO DE BRASÍLIA`.
 - Show the full result date including the year, such as `26 AGO 2026`. Give the date substantially more visual weight than ordinary metadata while keeping the final score as the largest focal element.
 - Visible result information should stay concise: final-status label, competition/round, home and away names, correctly mapped official crests, verified final score, full date, and the exact JaguarTV logo.
-- The exact JaguarTV logo is a locked overlay asset in the upper-right corner; generated backgrounds must reserve space for it and must not include any fake substitute logo.
+- The exact JaguarTV logo is composited into the final flattened poster and its transparent locked foreground during poster production; generated backgrounds must reserve space and contain no substitute logo.
 - When space opens up after removing time and channels, enlarge the date, score, crests, team names, or central result composition. Do not add filler copy.
 - Choose the composition from verified Phase 2 evidence. Compatible concepts include the winning side celebrating while the loser is dejected, a verified goalscorer performing a supported celebration, a referee showing a red card to the correctly identified offending team/player, or another documented match turning point.
 - Winner/loser mapping is invariant across every concept: the winner may celebrate and the loser may appear disappointed, but those emotions must never be reversed. A red-card or incident scene must not imply that the wrong side committed the event.

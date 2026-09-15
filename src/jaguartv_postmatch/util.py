@@ -127,6 +127,28 @@ def stable_json_hash(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def deterministic_motion_plan(task_ids: list[str], seed: str) -> dict[str, dict[str, Any]]:
+    ranked = sorted(set(task_ids), key=lambda task_id: hashlib.sha256(f"{seed}:{task_id}".encode()).hexdigest())
+    dropped = ranked[-1] if len(ranked) % 2 else None
+    candidates = ranked[:-1] if dropped else ranked
+    selected = set(candidates[: len(candidates) // 2])
+    return {
+        task_id: {
+            "dynamic": task_id in selected,
+            "video_model_called": task_id in selected,
+            "rank": ranked.index(task_id) + 1,
+            "reason": (
+                "selected_deterministically_for_background_motion"
+                if task_id in selected
+                else "odd_batch_candidate_dropped_to_static"
+                if task_id == dropped
+                else "static_half_not_sent_to_video_model"
+            ),
+        }
+        for task_id in task_ids
+    }
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
