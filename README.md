@@ -15,7 +15,7 @@ GitHub: `0925lyz/jaguartv-postmatch-video-factory`
 4. 当前任务文本大模型先根据核实后的研究证据生成逐场英文背景提示词，再优先调用当前大模型 API 的 `gpt-image-2`；失败后才显式调用 APIMart。文字、比分、队徽、频道图标和 Figure 1 由本地确定性合成。
 5. 每批只确定性选择一半海报用即梦 VIP / Seedance 2.0 Fast 720p 生成 4 秒背景动态；不可用或生成失败时，使用 APIMart `wan2.6-i2v-flash` 的 720p、4 秒后备路由。其余海报直接生成本地 4 秒静态钩子。
 6. 视频模型只接收背景层；右上 Figure 1 原图 logo、文字、比分、队徽、频道图标和日期作为锁定前景逐帧合成，不能变形或漂移。
-7. 后续两段操作素材和动态 CTA 全部从已有授权库存轮循并完整播放；成片时长按 `4 秒 hook + 操作素材实际时长 + CTA/口播实际时长` 动态计算，不强制 12 秒。文件使用中文命名并按 `01`、`02`、`03` 排序。
+7. 后续两段操作素材和动态 CTA 从仓库本地库存轮循并完整播放；四类素材独立维护顺序，成片时长按 `4 秒 hook + 操作素材实际时长 + CTA 实际时长` 计算。短音乐循环后精确裁切，口播不得延长 CTA。文件使用中文命名并按 `01`、`02`、`03` 排序。
 8. 首帧和封面完整复现海报。
 9. 幂等上传到 Pending Review 的 `赛后比分` 标签，不自动发布；桌面交付目录为 `每日赛后海报` 和 `赛后比分`。
 
@@ -42,8 +42,8 @@ cp config/postmatch.example.json config/local.json
 API-Football 密钥读取 `API_FOOTBALL_KEY`，不要写进配置或仓库。
 文字提示词默认使用当前任务窗口正在执行的大模型；也可以在 `reasoning.primary_model`
 里指定 `hy3`、`hy4`、`deepseek` 或 `gpt` 系列等已配置模型。
-CTA 口播库存包含现有女性巴葡声音和一次性生成的 APIMart `gpt-4o-mini-tts`
-`onyx` 激情男声；已有文件会直接复用，不会每天重新生成。发布文案固定包含
+CTA 口播只扫描 `assets/audio/voiceover` 中的本地 WAV，不调用 TTS；背景音乐同样只使用
+`assets/audio/music` 的本地文件。发布文案固定包含
 `Acesse jaguartvbrasil.com/baixar-app para baixar.`，TikTok 的 5 个标签必须包含
 `#jaguartv` 与 `#iptv`。
 
@@ -65,12 +65,6 @@ WorkBuddy 可直接粘贴的两份自动化提示词见
 
 ```bash
 scripts/run-daily.sh
-```
-
-素材交付工具可将历史成片、赛前/赛后海报、4-9 秒操作段和末 3 秒 CTA 按 SHA-256 去重：
-
-```bash
-jaguartv-media-library --config config/media-library.example.json
 ```
 
 更多边界和失败策略见 [docs/architecture.md](docs/architecture.md)。

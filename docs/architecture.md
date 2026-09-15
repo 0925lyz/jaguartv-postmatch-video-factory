@@ -13,7 +13,7 @@ selection, kickoff time, channel identity, and stable fixture IDs. Task 3 never 
 | 1 | Task 1 fixtures plus API-Football official results | Versioned result records | Status is FT, AET, or PEN |
 | 2 | One completed match | Evidence, event, and participant records for poster ideation | Match-specific sources only |
 | 3 | Verified result and research | Text-model Image2 prompt, 4:5 poster, QA | Event support, score, winner, player, logo, face safety |
-| 4 | Validated poster plus existing V7 inventory | Generated 4-second poster hook, dynamically timed stitched video, cover, manifests | Dreamina then APIMart fallback; inventory clips play in full |
+| 4 | Validated poster plus repository-local media inventory | Generated 4-second poster hook, dynamically timed stitched video, cover, manifests | Dreamina then APIMart fallback; inventory clips play in full |
 | 5 | Validated package | Pending Review record | Exact label 赛后比分; idempotent upload |
 
 Result revisions and uploads are content-addressed. A corrected official score updates the current
@@ -29,11 +29,11 @@ poster hash, style label, complete caption, or final-video hash across the two b
 - `API-Football`: primary post-match result source whenever WorkBuddy invokes the workflow.
 - `image2数据库`: current player, crest, kit, channel, prompt, and style inventory.
 - `system-prompts-and-models-of-ai-tools`: configured prompt routing for the current task model.
-- `jaguartv-v7-pack`: operation clips, CTA, music, voice inventory, and video compositor.
+- Repository `assets`: operator-supplied operation clips, CTA videos, music, and CTA voice inventory.
 - `jaguar视频二创`: authenticated Pending Review upload adapter and server package contract.
 
-All are configured by local absolute paths and remain external to this repository. This avoids
-duplicating credentials, browser profiles, large licensed assets, or another repository's history.
+Integrations are configured by local absolute paths. The authorized production media inventory is
+bundled in this repository; credentials and browser profiles remain external.
 WorkBuddy owns scheduling. This repository exposes execution scripts but stores no fixed trigger time.
 
 Phase 3 first sends the verified Phase 2 evidence to the current task text model. That model writes
@@ -49,7 +49,10 @@ four-second hook. Unselected posters use a local four-second still and never ent
 Dreamina/Jimeng VIP Seedance 2.0 Fast 720p is primary; APIMart
 `wan2.6-i2v-flash` at 720p for four seconds is the recorded fallback. Downloader/search/main-interface
 segments, motion CTA, music, and voiceover are selected from existing authorized inventory. Both
-operation clips and the CTA play in full, so final duration is calculated from actual media durations.
+operation clips and the CTA play in full, so final duration is calculated from actual video content.
+The four pools rotate independently in stable filename order through `runtime/media-rotation.json`.
+Reservations survive restarts and commit only after final validation. Short music loops and is
+trimmed to the exact final duration; voice is trimmed to the CTA window and never extends the video.
 During generated hooks, only the background moves. The deterministic 2048x2560 poster compositor
 retains all text, score, crests, authorized channel icons, and the exact Figure 1 logo in a transparent
 locked foreground, then reapplies it frame-for-frame over the moving background.

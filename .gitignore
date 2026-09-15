@@ -27,3 +27,4 @@ delivery/
 *.m4v
 *.wav
 *.mp3
+!assets/**

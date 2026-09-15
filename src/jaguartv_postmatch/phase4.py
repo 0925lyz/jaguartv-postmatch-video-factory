@@ -17,10 +17,16 @@ from typing import Any
 from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 from .credentials import env_or_keychain
+from .media_inventory import (
+    commit_rotation,
+    discard_stale_pending,
+    discover_inventory,
+    inventory_fingerprint,
+    reserve_rotation,
+)
 from .retry import _write_state, retry_forever
 from .util import codex_model_args, deterministic_motion_plan, normalize_name, postmatch_run_dir, utc_now
 from .util import sanitize_filename_part
-from .voice import prepare_voice_rotation
 
 
 W, H = 1080, 1920
@@ -102,6 +108,28 @@ def _duration(path: Path) -> float:
     return float(completed.stdout.strip())
 
 
+def _av_durations(path: Path) -> dict[str, float]:
+    completed = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration",
+            "-of", "json", str(path),
+        ],
+        text=True, capture_output=True, timeout=30, check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"ffprobe A/V duration failed for {path.name}: {completed.stderr[-500:]}")
+    payload = json.loads(completed.stdout)
+    container = float(payload["format"]["duration"])
+    durations = {
+        stream["codec_type"]: float(stream.get("duration") or container)
+        for stream in payload.get("streams", [])
+        if stream.get("codec_type") in {"video", "audio"}
+    }
+    if set(durations) != {"video", "audio"}:
+        raise RuntimeError(f"Final video must contain video and audio streams: {path.name}")
+    return durations
+
+
 def video_filenames(poster_path: str | Path, source_seconds: int = 4, sequence: str | int | None = None) -> dict[str, str]:
     stem = sanitize_filename_part(Path(poster_path).stem)
     prefix = f"{int(sequence):02d}" if sequence is not None else ""
@@ -121,63 +149,15 @@ def video_filenames(poster_path: str | Path, source_seconds: int = 4, sequence: 
 def _assembly_timing(
     operation_durations: list[float], cta_duration: float, voice_duration: float
 ) -> dict[str, Any]:
-    cta_seconds = max(cta_duration, voice_duration)
     return {
         "hook_seconds": 4.0,
         "operation_seconds": operation_durations,
         "cta_source_seconds": cta_duration,
         "voice_seconds": voice_duration,
-        "cta_seconds": cta_seconds,
-        "final_seconds": 4.0 + sum(operation_durations) + cta_seconds,
+        "voice_played_seconds": min(cta_duration, voice_duration),
+        "cta_seconds": cta_duration,
+        "final_seconds": 4.0 + sum(operation_durations) + cta_duration,
     }
-
-
-def cta_rotation_state(
-    factory_root: Path,
-    runtime_root: Path,
-    ctas: list[Path],
-    target_date: date,
-) -> tuple[int, dict[str, Any]]:
-    if not ctas:
-        raise FileNotFoundError("CTA inventory is empty")
-    state_path = runtime_root / "component-rotation.json"
-    state: dict[str, Any] = {"policy": "round-robin-across-production-days"}
-    if state_path.is_file():
-        state.update(json.loads(state_path.read_text(encoding="utf-8")))
-    try:
-        next_index = int(state.get("next_cta_index", 0)) % len(ctas)
-    except (TypeError, ValueError):
-        next_index = 0
-
-    if state.get("last_date") != target_date.isoformat():
-        latest_before: tuple[str, int] | None = None
-        for run_dir in sorted((factory_root / "runs").glob("*")):
-            if not run_dir.is_dir():
-                continue
-            run_date = run_dir.name
-            if run_date >= target_date.strftime("%Y%m%d"):
-                continue
-            manifest_path = run_dir / "phase4" / "build-manifest.json"
-            if not manifest_path.is_file():
-                continue
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                items = manifest.get("items") or []
-            except (json.JSONDecodeError, OSError):
-                continue
-            if not items:
-                continue
-            last_cta = str(items[-1].get("cta") or "")
-            try:
-                cta_index = next(i for i, candidate in enumerate(ctas) if str(candidate.resolve()) == str(Path(last_cta).resolve()))
-            except StopIteration:
-                continue
-            if latest_before is None or run_date > latest_before[0]:
-                latest_before = (run_date, (cta_index + 1) % len(ctas))
-        if latest_before is not None:
-            next_index = latest_before[1]
-
-    return next_index, state_path
 
 
 def _master_from_layers(
@@ -645,6 +625,7 @@ def _compose_full_inventory(
     operation_durations = [_duration(path) for path in modules]
     cta_source_duration = _duration(cta)
     voice_duration = _duration(voice)
+    hook_source_duration = _duration(hook)
     timing = _assembly_timing(operation_durations, cta_source_duration, voice_duration)
     visuals = [hook, *modules, cta]
     visual_durations = [4.0, *operation_durations, timing["cta_seconds"]]
@@ -656,7 +637,8 @@ def _compose_full_inventory(
     command.extend(["-stream_loop", "-1", "-i", str(music), "-i", str(voice)])
     filters = []
     video_labels = []
-    for index, (duration, source_duration) in enumerate(zip(visual_durations, [4.0, *operation_durations, cta_source_duration])):
+    source_durations = [hook_source_duration, *operation_durations, cta_source_duration]
+    for index, (duration, source_duration) in enumerate(zip(visual_durations, source_durations)):
         extension = max(0.0, duration - source_duration)
         pad = f",tpad=stop_mode=clone:stop_duration={extension:.6f}" if extension > 0.01 else ""
         filters.append(
@@ -670,7 +652,7 @@ def _compose_full_inventory(
     total = timing["final_seconds"]
     filters.extend([
         f"[{music_index}:a]atrim=0:{total:.6f},asetpts=N/SR/TB,volume='if(gte(t,{cta_start:.6f}),0.12,0.3)':eval=frame[bg]",
-        f"[{voice_index}:a]atrim=0:{voice_duration:.6f},asetpts=N/SR/TB,adelay={round(cta_start * 1000)}:all=1,volume=1.15[vo]",
+        f"[{voice_index}:a]atrim=0:{timing['voice_played_seconds']:.6f},asetpts=N/SR/TB,adelay={round(cta_start * 1000)}:all=1,volume=1.15[vo]",
         "[bg][vo]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=7,alimiter=limit=0.8:attack=5:release=50[a]",
     ])
     command.extend([
@@ -682,6 +664,13 @@ def _compose_full_inventory(
     completed = subprocess.run(command, text=True, capture_output=True, timeout=900, check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"ffmpeg full-duration compose failed: {(completed.stderr or completed.stdout)[-900:]}")
+    durations = _av_durations(output)
+    if abs(durations["video"] - total) > 0.12 or abs(durations["audio"] - durations["video"]) > 0.12:
+        raise RuntimeError(
+            f"Final A/V duration mismatch for {output.name}: expected={total:.3f} "
+            f"video={durations['video']:.3f} audio={durations['audio']:.3f}"
+        )
+    timing.update({"video_seconds": durations["video"], "audio_seconds": durations["audio"]})
     return timing
 
 
@@ -830,21 +819,9 @@ def run_phase4(
     schema_path = phase4_dir / "motion-prompt.schema.json"
     _write_json(schema_path, MOTION_SCHEMA)
     v7 = Path(str(config["jaguartv_v7_pack"])).resolve()
-    factory_assets = v7 / "video_templates" / "jaguartv_match_video_factory" / "assets"
-    modules = {
-        "downloader": factory_assets / "01-omni-downloader-enlarged-stable-3.0s.mp4",
-        "google": factory_assets / "02-google-search-jaguartvbrasil-full-logo-3.0s.mp4",
-        "main_epg": factory_assets / "02-omni-football-epg-stable-3.0s.mp4",
-    }
-    cta_dir = factory_assets / "replaceable" / "cta"
-    ctas = sorted((cta_dir / "motion").glob("*.mp4"))
-    music_dir = factory_assets / "replaceable" / "music"
-    music = sorted(music_dir.glob("0*.m4a"))
-    voices, voice_rotation_meta = prepare_voice_rotation(config, target_date, factory_root)
-    required = [*modules.values()]
-    if any(not path.is_file() for path in required) or not ctas or not music or not voices:
-        missing = [str(path) for path in required if not path.is_file()]
-        raise FileNotFoundError(f"Required v7 production assets unavailable: {missing}; CTA={len(ctas)} music={len(music)} voice={len(voices)}")
+    asset_root = Path(str(config.get("media_assets_root") or factory_root / "assets")).resolve()
+    inventory = discover_inventory(asset_root)
+    inventory_id = inventory_fingerprint(inventory)
 
     video_config = config["video"]
     model = str(video_config["model"])
@@ -854,31 +831,31 @@ def run_phase4(
         raise ValueError("Post-match poster hook must be exactly 4 seconds")
     states: dict[str, dict[str, Any]] = {}
     manifest_items = []
-    operation_pairs = [
-        ("downloader_then_main", modules["downloader"], modules["main_epg"]),
-        ("google_then_main", modules["google"], modules["main_epg"]),
-        ("main_then_downloader", modules["main_epg"], modules["downloader"]),
-        ("main_then_google", modules["main_epg"], modules["google"]),
-    ]
 
     runtime_root = Path(str(config.get("runtime_root") or factory_root / "runtime")).resolve()
+    rotation_state_path = runtime_root / "media-rotation.json"
+    usage_ids = {
+        entry["task_id"]: f"postmatch:{run_dir.name}:{entry['task_id']}:{inventory_id[:16]}"
+        for entry in entries
+    }
+    discard_stale_pending(rotation_state_path, set(usage_ids.values()))
     reasoning = config.get("reasoning") or {}
     primary_model = str(reasoning.get("primary_model") or DEFAULT_REASONING_MODEL)
     fallback_model = str(reasoning.get("fallback_model") or primary_model or DEFAULT_REASONING_FALLBACK)
     model_provider = reasoning.get("model_provider")
     reasoning_effort = str(reasoning.get("reasoning_effort") or "high")
-    cta_start, rotation_state_path = cta_rotation_state(factory_root, runtime_root, ctas, target_date)
-    previous_manifest_path = phase4_dir / "build-manifest.json"
-    previous_items: dict[str, dict[str, Any]] = {}
-    if previous_manifest_path.is_file():
-        previous_manifest = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
-        previous_items = {item["task_id"]: item for item in previous_manifest.get("items", [])}
-    assigned_cta_indexes: list[int] = []
-    cta_assignment_count = 0
-
     for index, entry in enumerate(entries):
         entry["sequence"] = f"{index + 1:02d}"
         task_id = entry["task_id"]
+        usage_id = usage_ids[task_id]
+        reservation = reserve_rotation(
+            rotation_state_path, inventory, usage_id, operation_count=2, fingerprint=inventory_id,
+        )
+        selected = reservation["components"]
+        first_module, second_module = (Path(path) for path in selected["operation"])
+        cta_path = Path(selected["cta"])
+        music_path = Path(selected["music"])
+        voice_path = Path(selected["voice"])
         names = video_filenames(entry["poster_path"], source_seconds, entry["sequence"])
         media_stem = names["media_stem"]
         master = output_dir / names["master"]
@@ -931,25 +908,6 @@ def run_phase4(
                     ) from fallback_error
             _write_json(submit_record_path, {**submit, "task_id": task_id})
 
-        previous = previous_items.get(task_id, {})
-        try:
-            cta_path = Path(str(previous["cta"])).resolve()
-            cta_index = next(i for i, candidate in enumerate(ctas) if candidate.resolve() == cta_path)
-            operation_name = str(previous["interface_operation"])
-            first_module = Path(str(previous["middle_segments"][0])).resolve()
-            second_module = Path(str(previous["middle_segments"][1])).resolve()
-            music_path = Path(str(previous["music"])).resolve()
-            music_index = next(i for i, candidate in enumerate(music) if candidate.resolve() == music_path)
-        except (KeyError, IndexError, StopIteration):
-            previous = {}
-        if not previous:
-            cta_index = (cta_start + cta_assignment_count) % len(ctas)
-            cta_assignment_count += 1
-            operation_name, first_module, second_module = operation_pairs[index % len(operation_pairs)]
-            music_index = index % len(music)
-        voice_index = cta_index % len(voices)
-        assigned_cta_indexes.append(cta_index)
-        cta_path = ctas[cta_index]
         component = {
             "task_id": task_id,
             "sequence": entry["sequence"],
@@ -986,40 +944,26 @@ def run_phase4(
                 {"role": "middle_operation_1", "source": str(first_module.resolve())},
                 {"role": "middle_operation_2", "source": str(second_module.resolve())},
                 {"role": "cta", "source": str(cta_path.resolve())},
-                {"role": "music", "source": str(music[music_index].resolve())},
-                {"role": "voice", "source": str(voices[voice_index].resolve())},
+                {"role": "music", "source": str(music_path.resolve())},
+                {"role": "voice", "source": str(voice_path.resolve())},
             ],
             "hook_compositing_mode": "generated ambient 9:16 extension with exact deterministic 4:5 poster locked above it",
             "seed": None,
             "seed_note": "The selected video provider did not expose a seed; no seed was fabricated.",
             "submit": submit,
             "raw_video": str(raw_video.resolve()) if selected_for_motion else "",
-            "interface_operation": operation_name,
+            "interface_operation": "round_robin_inventory",
             "middle_segments": [str(first_module.resolve()), str(second_module.resolve())],
             "cta": str(cta_path.resolve()),
-            "cta_index": cta_index,
-            "cta_rotation_policy": "round-robin-across-production-days",
-            "music": str(music[music_index].resolve()),
-            "music_index": music_index,
-            "voice": str(voices[voice_index].resolve()),
-            "voice_index": voice_index,
-            "source_assets": [entry["poster_path"], str(first_module.resolve()), str(second_module.resolve()), str(cta_path.resolve()), str(music[music_index].resolve()), str(voices[voice_index].resolve())],
+            "music": str(music_path.resolve()),
+            "voice": str(voice_path.resolve()),
+            "media_inventory_fingerprint": inventory_id,
+            "asset_rotation": reservation,
+            "source_assets": [entry["poster_path"], str(first_module.resolve()), str(second_module.resolve()), str(cta_path.resolve()), str(music_path.resolve()), str(voice_path.resolve())],
             "created_at": utc_now(),
         }
         manifest_items.append(component)
-        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
-
-    if assigned_cta_indexes:
-        rotation_state = {
-            "policy": "round-robin-across-production-days",
-            "last_date": target_date.isoformat(),
-            "cta_start_index": cta_start,
-            "last_cta_index": assigned_cta_indexes[-1],
-            "next_cta_index": (assigned_cta_indexes[-1] + 1) % len(ctas),
-            "assigned_cta_count": len(assigned_cta_indexes),
-            "cta_count": len(ctas),
-        }
-        _write_json(rotation_state_path, rotation_state)
+        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "media_inventory_fingerprint": inventory_id, "items": manifest_items})
 
     if states:
         _poll_all(states)
@@ -1048,7 +992,7 @@ def run_phase4(
                 "video_fallback_used": True,
             })
             item["generated_segments"][0]["generator"] = submit["provider"]
-        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
+        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "media_inventory_fingerprint": inventory_id, "items": manifest_items})
 
     combinations = set()
     validations = []
@@ -1086,7 +1030,7 @@ def run_phase4(
         first_cover_rms = _rms_difference(cover, first_frame)
         motion_rms = _rms_difference(first_frame, moving_frame)
         foreground_rms = _locked_foreground_rms(master, moving_frame, foreground_master)
-        combination = (item["interface_operation"], Path(item["cta"]).name, Path(item["music"]).name, tuple(Path(path).name for path in item["middle_segments"]))
+        combination = (Path(item["cta"]).name, Path(item["music"]).name, Path(item["voice"]).name, tuple(Path(path).name for path in item["middle_segments"]))
         duplicate = combination in combinations
         combinations.add(combination)
         qa = {
@@ -1098,6 +1042,7 @@ def run_phase4(
             "final_probe": final_probe,
             "expected_final_seconds": assembly_timing["final_seconds"],
             "final_duration_matches_inventory": abs(final_probe["duration"] - assembly_timing["final_seconds"]) <= 0.12,
+            "audio_matches_video_duration": abs(assembly_timing["audio_seconds"] - assembly_timing["video_seconds"]) <= 0.12,
             "final_1080x1920": (final_probe["width"], final_probe["height"]) == (W, H),
             "first_frame_rms_vs_master": round(first_rms, 3),
             "first_frame_faithful": first_rms < 18.0,
@@ -1118,6 +1063,7 @@ def run_phase4(
         qa["passed"] = all(
             qa[key] for key in (
                 "master_1080x1920", "poster_fully_visible", "hook_4_seconds", "final_duration_matches_inventory",
+                "audio_matches_video_duration",
                 "final_1080x1920", "first_frame_faithful", "cover_is_complete_poster_master",
                 "first_frame_matches_video_cover", "hook_is_dynamic", "no_duplicate_combination",
                 "poster_facts_stable_at_2s", "video_model_call_policy_ok",
@@ -1132,7 +1078,10 @@ def run_phase4(
             "qa": str(qa_path.resolve()), "completed_at": utc_now(),
         })
         validations.append(qa)
-        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "voice_rotation": voice_rotation_meta, "items": manifest_items})
+        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "media_inventory_fingerprint": inventory_id, "items": manifest_items})
+        commit_rotation(rotation_state_path, item["asset_rotation"]["usage_id"])
+        item["asset_rotation"]["committed"] = True
+        _write_json(phase4_dir / "build-manifest.json", {"schema_version": "jaguartv-v7-postmatch-build-v1", "target_date": target_date.isoformat(), "batch_id": batch_id, "updated_at": utc_now(), "media_inventory_fingerprint": inventory_id, "items": manifest_items})
 
     captions_path = phase4_dir / "captions.json"
     _write_json(captions_path, _captions(entries, research_by_id, target_date, batch_id))

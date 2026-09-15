@@ -34,9 +34,9 @@ These rules apply to every task and automation in this repository.
 - In the generated poster hook, animate the poster background and match emotion: the winning
   player may jump, shout, pump fists, and celebrate intensely; the losing player may pound the
   turf, sigh, bury their head in their hands, or complain toward the referee, teammate, or opponent.
-- Generate a small reusable APIMart `gpt-4o-mini-tts` CTA inventory with `onyx` energetic male
-  voices plus `nova` / `shimmer` female voices, and rotate it with existing authorized local WAVs.
-  Pair voice rotation to CTA rotation and do not generate voices daily.
+- Use only the repository's authorized local music and CTA voice inventories. Never call TTS or
+  another generation service for music or voice. Rotate operation, CTA, music, and voice pools
+  independently, and commit each position only after the final video passes validation.
 
 ## Post-match invariants
 

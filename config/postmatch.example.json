@@ -8,6 +8,7 @@
   "jaguartv_v7_pack": "${JAGUARTV_V7_ROOT}",
   "image2_database": "${JAGUARTV_IMAGE2_DATABASE}",
   "figure_1": "assets/figure-1-jaguartv.png",
+  "media_assets_root": "assets",
   "channel_icons": "${JAGUARTV_IMAGE2_DATABASE}/assets/channels",
   "pending_review_uploader": "${JAGUARTV_UPLOAD_ADAPTER}",
   "runtime_root": "runtime",
@@ -55,20 +56,6 @@
     "first_frame_and_cover": "locked-foreground-over-background-only-motion",
     "filename_language": "zh-CN",
     "filename_source": "validated-poster-filename"
-  },
-  "voiceover": {
-    "provider": "apimart",
-    "model": "gpt-4o-mini-tts",
-    "inventory": [
-      {"id": "nova-01", "voice": "nova", "text": "Bora pro jogo! Sete dias grátis no Jaguar TV."},
-      {"id": "nova-02", "voice": "nova", "text": "Baixe agora! Jaguar Tê Vê, sete dias grátis!"},
-      {"id": "shimmer-01", "voice": "shimmer", "text": "Bora pro jogo! Sete dias grátis no Jaguar TV."},
-      {"id": "shimmer-02", "voice": "shimmer", "text": "Baixe agora! Jaguar Tê Vê, sete dias grátis!"},
-      {"id": "onyx-01", "voice": "onyx", "text": "Vem com tudo! Futebol ao vivo é no Jaguar TV!"},
-      {"id": "onyx-02", "voice": "onyx", "text": "Não perde tempo! Baixe agora o app Jaguar TV!"}
-    ],
-    "speed": 1.3,
-    "fallback_to_local": true
   },
   "server": {
     "category": "post_match_score",

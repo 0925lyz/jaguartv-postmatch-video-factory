@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from .assets import materialize_player_assets
 from .collector import collect_completed_results
 from .lock import LockUnavailable, ProcessLock
+from .media_inventory import discover_inventory
 from .phase3 import run_phase3
 from .phase4 import run_phase4
 from .phase5 import run_phase5
@@ -48,9 +49,10 @@ def load_config(path: Path) -> dict[str, Any]:
     payload = _expand_config_value(json.loads(config_path.read_text(encoding="utf-8")))
     if not isinstance(payload, dict):
         raise ValueError("post-match config must be a JSON object")
+    payload.setdefault("media_assets_root", "assets")
     for key in (
         "collector_root", "system_prompts_and_models", "jaguartv_v7_pack",
-        "image2_database", "figure_1", "channel_icons", "pending_review_uploader",
+        "image2_database", "figure_1", "media_assets_root", "channel_icons", "pending_review_uploader",
         "runtime_root",
     ):
         raw = Path(str(payload[key])).expanduser()
@@ -144,12 +146,20 @@ def preflight(config: dict[str, Any]) -> dict[str, Any]:
         "jaguartv_v7_pack": _path(config, "jaguartv_v7_pack"),
         "image2_database": _path(config, "image2_database"),
         "figure_1": _path(config, "figure_1"),
+        "media_assets_root": _path(config, "media_assets_root"),
         "channel_icons": _path(config, "channel_icons"),
         "pending_review_uploader": _path(config, "pending_review_uploader"),
     }
     checks: dict[str, Any] = {
         name: {"available": path.exists(), "path": str(path)} for name, path in required_paths.items()
     }
+    try:
+        checks["media_inventory"] = {
+            "available": True,
+            "counts": {key: len(paths) for key, paths in discover_inventory(_path(config, "media_assets_root")).items()},
+        }
+    except (FileNotFoundError, ValueError) as error:
+        checks["media_inventory"] = {"available": False, "error": str(error)}
     checks["agent_reach"] = {"available": executable_path("agent-reach") is not None}
     checks.update(_research_connectivity())
     checks["research_route"] = {

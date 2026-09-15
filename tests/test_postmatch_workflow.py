@@ -35,7 +35,6 @@ from jaguartv_postmatch.phase4 import (
     _motion_context,
     video_filenames,
 )
-from jaguartv_postmatch.voice import DEFAULT_INVENTORY, cta_voice_filename
 from jaguartv_postmatch.phase5 import _artifact_revision, _validate_cross_batch_uniqueness
 from jaguartv_postmatch.retry import retry_forever
 from jaguartv_postmatch.store import WorkflowStore
@@ -376,10 +375,11 @@ Verified match-specific summary.
         self.assertEqual(names["cover"], "01科林蒂安-0：1-桑托斯_260830_海报_封面_1080x1920.jpg")
 
     def test_assembly_timing_preserves_full_inventory_durations(self) -> None:
-        timing = _assembly_timing([3.0, 4.25], 5.55, 4.62)
+        timing = _assembly_timing([3.0, 4.25], 5.55, 8.0)
         self.assertEqual(timing["hook_seconds"], 4.0)
         self.assertEqual(timing["operation_seconds"], [3.0, 4.25])
         self.assertEqual(timing["cta_seconds"], 5.55)
+        self.assertEqual(timing["voice_played_seconds"], 5.55)
         self.assertAlmostEqual(timing["final_seconds"], 16.8)
 
     def test_same_date_batches_have_separate_runs_styles_and_captions(self) -> None:
@@ -509,11 +509,6 @@ Verified match-specific summary.
             ), "resumed")
             self.assertTrue(resumed_delays and resumed_delays[0] > 0)
 
-    def test_cta_voice_inventory_contains_reusable_male_and_female_voices(self) -> None:
-        voices = {entry["voice"] for entry in DEFAULT_INVENTORY}
-        self.assertIn("onyx", voices)
-        self.assertTrue({"nova", "shimmer"} & voices)
-
     def test_publish_copy_contains_download_sentence_and_required_tags(self) -> None:
         item = _caption_for_single(
             {
@@ -562,19 +557,6 @@ Verified match-specific summary.
         self.assertIn("poster background", SINGLE_HOOK_ACTION_POLICY)
         self.assertIn("jump", SINGLE_HOOK_ACTION_POLICY)
         self.assertIn("pound the turf", SINGLE_HOOK_ACTION_POLICY)
-
-    def test_cta_voice_filename_uses_female_voice_and_variant(self) -> None:
-        self.assertEqual(
-            cta_voice_filename("nova", "01"),
-            "cta-voice-ptbr-nova-01.wav",
-        )
-
-    def test_cta_voice_inventory_filenames_are_stable(self) -> None:
-        self.assertEqual(
-            cta_voice_filename("shimmer", "02"),
-            "cta-voice-ptbr-shimmer-02.wav",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()
