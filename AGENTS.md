@@ -61,6 +61,9 @@ These rules apply to every task and automation in this repository.
   goalscorer celebration, a referee showing a red card to the correctly identified offending side,
   another verified match turning point, or the classic winner/loser reaction. Never invent an event.
 - Keep faces unobstructed and place score panels below the face-safe region.
+- For every single-result poster, keep the score panel, both verified official crest boxes, and both team-name
+  boxes as separate deterministic regions. Require at least 48px clearance between a crest and the score panel
+  or team-name box; a failed crest/layout QA check blocks the poster rather than publishing it.
 - Use the complete poster as the exact first video frame and cover; never crop poster content.
 - Generated video filenames must be Chinese.
 - Prefix generated video filenames in production order with `01`, `02`, `03` and keep captions in

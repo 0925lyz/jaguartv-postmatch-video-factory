@@ -547,7 +547,7 @@ Hard requirements for every prompt:
 - Keep the approved latest WorkBuddy post-match poster construction as the main style reference: premium real-player football editorial, strong depth, dramatic but clean background, clear winner/loser emotion, large readable result hierarchy, and no clutter.
 - Prefer recognizable, photorealistic likenesses of the verified players supplied in each match's visual_direction. Every named player must have actually participated for the stated team. If no verified real-player information is available, use an anonymous fictional hardman footballer in the correct current team kit colours; all player, crest, and kit assets are operator-authorized for this project.
 - Use the verified current-season team kit design and colors. Do not generate readable sponsors, fake badges, fake crests, names, or numbers; exact official crests are composited later.
-- Keep every head, face, hairline, and eyes fully unobstructed in the upper side portrait zones. Reserve the upper-right for the exact Figure 1 JaguarTV logo asset only; never draw, invent, stylize, or change the logo. Reserve the central-lower band beginning below y=760/2560 for the score panel, crests, and team names; no face may touch that band.
+- Keep every head, face, hairline, and eyes fully unobstructed above y=700/2560. Reserve the upper-right for the exact Figure 1 JaguarTV logo asset only; never draw, invent, stylize, or change the logo. The deterministic factual layout is fixed: score panel y=760..1185, two crest zones y=1255..1565, and team-name zones below y=1640; no face, hair, shoulder, generated mark, or text may enter these regions.
 - Treat each match's verified_events, verified_research_summaries, and allowed_poster_concepts as the only evidence available for its visual story. Choose one clear leading concept from that match's allowed_poster_concepts; the batch does not have to use one repeated winner-versus-loser template.
 - A verified goalscorer celebration is allowed only when that named scorer appears in verified_events.goals. A referee red-card scene is allowed only when verified_events.red_cards identifies the dismissed player or offending team; map the referee's card to that exact side. Other event-led scenes must be directly supported by the supplied match-specific evidence.
 - Map home to the left and away to the right without exception. Never depict the losing side as the winner. Whenever a decisive-result reaction is shown, the verified winner celebrates and the verified loser is disappointed. For a draw, use balanced restrained tension.
@@ -971,11 +971,26 @@ def _figure1(image: Image.Image, figure_path: Path) -> tuple[int, int, int, int]
     return (x, y, x + figure.width, y + figure.height)
 
 
-def _crest_disc(image: Image.Image, crest_path: Path, center: tuple[int, int], radius: int, accent: tuple[int, int, int]) -> None:
+def _crest_disc(image: Image.Image, crest_path: Path, center: tuple[int, int], radius: int, accent: tuple[int, int, int]) -> list[int]:
     draw = ImageDraw.Draw(image)
-    draw.ellipse((center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius), fill=(245, 247, 245, 240), outline=(*accent, 255), width=8)
+    box = [center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius]
+    draw.ellipse(box, fill=(245, 247, 245, 240), outline=(*accent, 255), width=8)
     crest = _contain(crest_path, (int(radius * 1.52), int(radius * 1.52)))
     _paste_center(image, crest, center)
+    return box
+
+
+def _text_box(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, font: ImageFont.ImageFont, stroke: int) -> list[int]:
+    return list(draw.textbbox(xy, text, font=font, anchor="mm", stroke_width=stroke))
+
+
+def _separate(first: list[int], second: list[int], clearance: int = 0) -> bool:
+    return (
+        first[2] + clearance <= second[0]
+        or second[2] + clearance <= first[0]
+        or first[3] + clearance <= second[1]
+        or second[3] + clearance <= first[1]
+    )
 
 
 def _single_fact_line(record: dict[str, Any]) -> str:
@@ -1028,25 +1043,34 @@ def compose_single(raw: Path, task: PosterTask, output: Path, figure_path: Path,
 
     panel = Image.new("RGBA", image.size, (0, 0, 0, 0))
     pd = ImageDraw.Draw(panel)
-    score_panel_box = (300, 760, W - 300, 1640)
-    face_safe_zone = (0, 320, W, 720)
+    score_panel_box = (300, 760, W - 300, 1185)
+    face_safe_zone = (0, 0, W, 700)
     pd.rounded_rectangle(score_panel_box, radius=38, fill=(0, 5, 12, 154), outline=(255, 255, 255, 95), width=3)
     image.alpha_composite(panel)
     score = f"{result['home_score']}  :  {result['away_score']}"
     draw = ImageDraw.Draw(image)
-    _text(draw, (W // 2, 1010), score, _font(300, True), (255, 255, 255, 255), 9)
+    score_face = _font(230, True)
+    _text(draw, (W // 2, 970), score, score_face, (255, 255, 255, 255), 8)
 
-    y_crest = 1370
-    _crest_disc(image, Path(fixture["home_crest"]), (570, y_crest), 155, home_color)
-    _crest_disc(image, Path(fixture["away_crest"]), (W - 570, y_crest), 155, away_color)
+    y_crest = 1410
+    crest_boxes = [
+        _crest_disc(image, Path(fixture["home_crest"]), (570, y_crest), 155, home_color),
+        _crest_disc(image, Path(fixture["away_crest"]), (W - 570, y_crest), 155, away_color),
+    ]
     draw = ImageDraw.Draw(image)
     _text(draw, (W // 2, y_crest), "FIM DE JOGO", _font(38, True), gold, 2)
     home = result["home_team"]
     away = result["away_team"]
-    _text(draw, (570, 1585), home, _fit_font(draw, home, 700, 66, 36, True), (255, 255, 255, 255), 3)
-    _text(draw, (W - 570, 1585), away, _fit_font(draw, away, 700, 66, 36, True), (255, 255, 255, 255), 3)
+    home_face = _fit_font(draw, home, 700, 66, 36, True)
+    away_face = _fit_font(draw, away, 700, 66, 36, True)
+    _text(draw, (570, 1700), home, home_face, (255, 255, 255, 255), 3)
+    _text(draw, (W - 570, 1700), away, away_face, (255, 255, 255, 255), 3)
+    team_name_boxes = [
+        _text_box(draw, (570, 1700), home, home_face, 3),
+        _text_box(draw, (W - 570, 1700), away, away_face, 3),
+    ]
 
-    channel_icons = _channel_icons(image, channel_dir, list(result.get("channels") or []), W // 2, 1835, 1160)
+    channel_icons = _channel_icons(image, channel_dir, list(result.get("channels") or []), W // 2, 1885, 1160)
 
     fact = _single_fact_line(record)
     footer = Image.new("RGBA", image.size, (0, 0, 0, 0))
@@ -1069,6 +1093,13 @@ def compose_single(raw: Path, task: PosterTask, output: Path, figure_path: Path,
         "foreground_path": str(foreground_path.resolve()),
         "channel_icons_deterministic": True,
         "channel_icons": channel_icons,
+        "crest_boxes": crest_boxes,
+        "team_name_boxes": team_name_boxes,
+        "crest_layout_clear": all(
+            _separate(crest, other, 48)
+            for crest in crest_boxes
+            for other in [list(score_panel_box), *team_name_boxes]
+        ),
         "identity_mode": record["research"].get("poster_identity_mode", "virtual-hardman-player"),
         "fact_line": fact,
         "score_panel_box": list(score_panel_box),
@@ -1140,6 +1171,8 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
     top, bottom = 350, 2460
     row_h = (bottom - top) // len(task.matches)
     channel_icons = []
+    crest_boxes = []
+    team_name_boxes = []
     for index, record in enumerate(task.matches):
         result, fixture = record["result"], record["fixture"]
         y0 = top + index * row_h
@@ -1155,13 +1188,21 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
 
         home_color = TEAM_COLORS.get(result["home_team"].upper(), ((25, 100, 180), (240, 240, 240)))[0]
         away_color = TEAM_COLORS.get(result["away_team"].upper(), ((180, 35, 45), (240, 240, 240)))[0]
-        _crest_disc(image, Path(fixture["home_crest"]), (430, yc - 18), 72, home_color)
-        _crest_disc(image, Path(fixture["away_crest"]), (W - 260, yc - 18), 72, away_color)
+        crest_boxes.extend([
+            _crest_disc(image, Path(fixture["home_crest"]), (405, yc - 18), 65, home_color),
+            _crest_disc(image, Path(fixture["away_crest"]), (W - 208, yc - 18), 65, away_color),
+        ])
         draw = ImageDraw.Draw(image)
         home = result["home_team"]
         away = result["away_team"]
-        _text(draw, (740, yc - 30), home, _fit_font(draw, home, 470, 42, 25, True), (255, 255, 255, 255), 2)
-        _text(draw, (W - 560, yc - 30), away, _fit_font(draw, away, 430, 42, 24, True), (255, 255, 255, 255), 2)
+        home_face = _fit_font(draw, home, 400, 42, 25, True)
+        away_face = _fit_font(draw, away, 340, 42, 24, True)
+        _text(draw, (720, yc - 30), home, home_face, (255, 255, 255, 255), 2)
+        _text(draw, (1475, yc - 30), away, away_face, (255, 255, 255, 255), 2)
+        team_name_boxes.extend([
+            _text_box(draw, (720, yc - 30), home, home_face, 2),
+            _text_box(draw, (1475, yc - 30), away, away_face, 2),
+        ])
         _text(draw, (1015, yc - 30), "VS", _font(34, True), (205, 214, 222, 255), 1)
         score = f"{result['home_score']} - {result['away_score']}"
         _text(draw, (1230, yc - 30), score, _font(66, True), gold, 3)
@@ -1179,6 +1220,11 @@ def compose_summary(raw: Path, task: PosterTask, output: Path, figure_path: Path
         "foreground_path": str(foreground_path.resolve()),
         "channel_icons_deterministic": True,
         "channel_icons": channel_icons,
+        "crest_boxes": crest_boxes,
+        "team_name_boxes": team_name_boxes,
+        "crest_layout_clear": all(
+            _separate(crest, name, 48) for crest in crest_boxes for name in team_name_boxes
+        ),
         "rows": len(task.matches),
         "sorted_by_kickoff": True,
     }
@@ -1194,6 +1240,8 @@ def validate_poster(path: Path, task: PosterTask, compose_meta: dict[str, Any]) 
     foreground_size = Image.open(foreground_path).size if foreground_path.is_file() else None
     foreground_alpha = Image.open(foreground_path).convert("RGBA").getchannel("A").getbbox() if foreground_path.is_file() else None
     icon_boxes = [item.get("box") for item in compose_meta.get("channel_icons") or []]
+    crest_boxes = [box for box in compose_meta.get("crest_boxes") or [] if isinstance(box, list) and len(box) == 4]
+    expected_crests = 2 if task.kind == "single" else len(task.matches) * 2
     checks = {
         "exists": path.is_file(),
         "dimensions": dimensions,
@@ -1210,7 +1258,8 @@ def validate_poster(path: Path, task: PosterTask, compose_meta: dict[str, Any]) 
         ),
         "pt_br_copy_deterministic": True,
         "score_deterministic": True,
-        "crests_deterministic": True,
+        "crests_deterministic": len(crest_boxes) == expected_crests,
+        "crest_layout_clear": bool(compose_meta.get("crest_layout_clear")),
         "match_count": len(task.matches),
         "summary_max_eight": task.kind != "summary" or len(task.matches) <= 8,
         "score_panel_below_face_safe_zone": (
