@@ -132,21 +132,31 @@ def deterministic_motion_plan(task_ids: list[str], seed: str) -> dict[str, dict[
     dropped = ranked[-1] if len(ranked) % 2 else None
     candidates = ranked[:-1] if dropped else ranked
     selected = set(candidates[: len(candidates) // 2])
-    return {
-        task_id: {
-            "dynamic": task_id in selected,
-            "video_model_called": task_id in selected,
+    plan = {}
+    for task_id in task_ids:
+        dynamic = task_id in selected
+        # Summary results grids are multi-crest / multi-team collages that trip image
+        # content-safety on every video-generation route (Dreamina + APIMart, even with
+        # the safe-prompt retry), so they always use the local static 4s hook instead of
+        # calling a video model. This keeps the batch valid and still honours the
+        # "half the batch uses a static hook" policy.
+        if task_id.startswith("summary_"):
+            dynamic = False
+        plan[task_id] = {
+            "dynamic": dynamic,
+            "video_model_called": dynamic,
             "rank": ranked.index(task_id) + 1,
             "reason": (
                 "selected_deterministically_for_background_motion"
-                if task_id in selected
+                if dynamic
+                else "summary_grid_static_hook_no_video_model"
+                if task_id.startswith("summary_")
                 else "odd_batch_candidate_dropped_to_static"
                 if task_id == dropped
                 else "static_half_not_sent_to_video_model"
             ),
         }
-        for task_id in task_ids
-    }
+    return plan
 
 
 def file_sha256(path: Path) -> str:

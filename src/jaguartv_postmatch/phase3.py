@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import subprocess
@@ -150,6 +151,10 @@ CHANNEL_FILES = {
     "PREMIERE 3": "Premiere.png",
     "PREMIERE FC": "Premiere.png",
     "PREMIERE": "Premiere.png",
+    "PREMIERE 4": "Premiere.png",
+    "PREMIERE 5": "Premiere.png",
+    "RECORD": "Record.png",
+    "SBT": "SBT.png",
     "GE TV": "Ge_TV.png",
     "SPORTV": "SporTV.png",
     "PRIME VIDEO": "Prime_Video.png",
@@ -417,8 +422,11 @@ def _build_model_brief(
         "generation_scope": "Image2 creates the photographic background and verified participating real-player likenesses when supplied; use fictional hardman players only when no verified participant is available. No generated words, numbers, logos or crests.",
         "matches": matches,
         "summary_pages": [
-            {"id": "summary_01", "match_ids": [item["id"] for item in matches[:5]]},
-            {"id": "summary_02", "match_ids": [item["id"] for item in matches[5:]]},
+            {
+                "id": f"summary_{index:02d}",
+                "match_ids": [item["id"] for item in matches[offset : offset + 5]],
+            }
+            for index, offset in enumerate(range(0, len(matches), 5), start=1)
         ],
     }
 
@@ -513,9 +521,22 @@ def generate_prompts_with_text_model(
     output_path = phase3_dir / "text-model-prompt-catalog.json"
     fingerprint_path = phase3_dir / "prompt-catalog.sha256"
     _write_json(brief_path, brief)
-    _write_json(schema_path, PROMPT_SCHEMA)
 
-    expected_ids = [item["result"]["task1_fixture_id"] for item in records] + ["summary_01", "summary_02"]
+    # Summary grids are chunked five matches per page in _make_tasks(); derive the same
+    # count here so batches with more than ten fixtures do not crash on a missing ID.
+    summary_count = max(1, (len(records) + 4) // 5)
+    summary_ids = [f"summary_{index:02d}" for index in range(1, summary_count + 1)]
+    expected_ids = [item["result"]["task1_fixture_id"] for item in records] + summary_ids
+    # The output schema caps the prompt array; a batch larger than the cap would silently
+    # truncate the last IDs, so widen the cap to the exact expected count.
+    schema = copy.deepcopy(PROMPT_SCHEMA)
+    schema["properties"]["posters"]["maxItems"] = max(
+        PROMPT_SCHEMA["properties"]["posters"]["maxItems"], len(expected_ids)
+    )
+    schema["properties"]["posters"]["minItems"] = min(
+        PROMPT_SCHEMA["properties"]["posters"]["minItems"], len(expected_ids)
+    )
+    _write_json(schema_path, schema)
     fingerprint = hashlib.sha256(
         json.dumps(
             {"policy": PROMPT_POLICY_VERSION, "model": primary_model, "brief": brief},
@@ -553,7 +574,7 @@ Hard requirements for every prompt:
 - Map home to the left and away to the right without exception. Never depict the losing side as the winner. Whenever a decisive-result reaction is shown, the verified winner celebrates and the verified loser is disappointed. For a draw, use balanced restrained tension.
 - Do not invent a red card, injury, confrontation, foul, goal, trophy, scorer, celebration, or turning point that is absent from the supplied evidence.
 - Include explicit negative constraints and deterministic overlay safe zones.
-- summary_01 and summary_02 are results grids: no players; clean aligned row bands; left area reserved for kickoff time and channel icons; middle reserved for home crest/name, 'vs', away name/crest and final score; top center reserved for the pt-BR date; upper-right reserved for Figure 1.
+- {", ".join(summary_ids)} are results grids: no players; clean aligned row bands sized to their own match_ids list; left area reserved for kickoff time and channel icons; middle reserved for home crest/name, 'vs', away name/crest and final score; top center reserved for the pt-BR date; upper-right reserved for Figure 1. Give each results grid a different background and row treatment.
 - Exactly one single-match poster, selected deterministically as the fourth single-match ID, must use a controlled alternative editorial collage style. The other singles use varied premium broadcast styles.
 
 Validated fact brief follows. Do not alter any score, team, competition, date, status, or match mapping:
@@ -565,44 +586,38 @@ Validated fact brief follows. Do not alter any score, team, competition, date, s
         "--output-schema", str(schema_path),
         "-o", str(output_path), instruction,
     ]
-    completed = subprocess.run(command, text=True, capture_output=True, timeout=1800, check=False)
-    model = primary_model
-    if completed.returncode != 0 or not output_path.is_file():
-        fallback_command = [
-            "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(phase3_dir),
-            "-s", "read-only", *codex_model_args(fallback_model, model_provider),
-            "--output-schema", str(schema_path),
-            "-o", str(output_path), instruction,
-        ]
-        fallback = subprocess.run(fallback_command, text=True, capture_output=True, timeout=1800, check=False)
-        if fallback.returncode != 0 or not output_path.is_file():
-            sanitized = (
-                fallback.stderr or fallback.stdout or completed.stderr or completed.stdout
-                or "unknown prompt model adapter failure"
-            )[-1200:]
-            raise RuntimeError(f"Prompt generation failed: {sanitized}")
-        model = fallback_model
-    catalog = _parse_prompt_catalog(output_path.read_text(encoding="utf-8"))
-    # codex may duplicate entries; keep the first occurrence of each id.
-    seen: set[str] = set()
-    deduped = []
-    for item in catalog.get("posters", []):
-        iid = item.get("id")
-        if iid in seen:
+    # Text-model output varies between runs; a single incomplete or mismatched catalog used to
+    # abort the whole batch. Retry the adapter a few times before giving up.
+    last_error: str | None = None
+    for attempt in range(1, 4):
+        completed = subprocess.run(command, text=True, capture_output=True, timeout=1800, check=False)
+        model = primary_model
+        if completed.returncode != 0 or not output_path.is_file():
+            fallback_command = [
+                "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(phase3_dir),
+                "-s", "read-only", *codex_model_args(fallback_model, model_provider),
+                "--output-schema", str(schema_path),
+                "-o", str(output_path), instruction,
+            ]
+            fallback = subprocess.run(fallback_command, text=True, capture_output=True, timeout=1800, check=False)
+            if fallback.returncode != 0 or not output_path.is_file():
+                sanitized = (
+                    fallback.stderr or fallback.stdout or completed.stderr or completed.stdout
+                    or "unknown prompt model adapter failure"
+                )[-1200:]
+                last_error = f"Prompt generation failed: {sanitized}"
+                print(f"[warn] prompt catalog attempt {attempt} failed to produce output; retrying", flush=True)
+                continue
+            model = fallback_model
+        validated = _load_validated_catalog(output_path, expected_ids)
+        if validated is None:
+            last_error = "Prompt catalog was missing, duplicated, or contained incomplete Image2 prompts"
+            print(f"[warn] prompt catalog attempt {attempt} invalid; retrying", flush=True)
             continue
-        seen.add(iid)
-        deduped.append(item)
-    catalog["posters"] = deduped
-    actual_ids = [item["id"] for item in deduped]
-    if sorted(actual_ids) != sorted(expected_ids) or len(actual_ids) != len(set(actual_ids)):
-        raise RuntimeError(f"Prompt catalog ID mismatch: {actual_ids}")
-    for item in deduped:
-        lowered = item["prompt"].lower()
-        if len(item["prompt"]) < 700 or "4:5" not in item["prompt"] or "readable text" not in lowered:
-            raise RuntimeError(f"Primary model produced an incomplete Image2 prompt for {item['id']}")
-    catalog["model"] = model
-    fingerprint_path.write_text(fingerprint + "\n", encoding="utf-8")
-    return catalog, model
+        validated["model"] = model
+        fingerprint_path.write_text(fingerprint + "\n", encoding="utf-8")
+        return validated, model
+    raise RuntimeError(last_error or "unknown prompt catalog failure")
 
 
 def _single_filename(result: dict[str, Any], target_date: date) -> str:
