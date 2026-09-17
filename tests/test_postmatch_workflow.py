@@ -24,8 +24,10 @@ from jaguartv_postmatch.phase3 import (
     FIXED_LOGO_POLICY,
     PosterTask,
     _build_model_brief,
+    compose_single,
     generate_image2,
     match_visual_direction,
+    validate_poster,
 )
 from jaguartv_postmatch.phase4 import (
     SINGLE_HOOK_ACTION_POLICY,
@@ -375,6 +377,36 @@ Verified match-specific summary.
         self.assertEqual(names["hook"], "01科林蒂安-0：1-桑托斯_260830_海报_动态钩子_4秒.mp4")
         self.assertEqual(names["final"], "01科林蒂安-0：1-桑托斯_260830_海报_成片.mp4")
         self.assertEqual(names["cover"], "01科林蒂安-0：1-桑托斯_260830_海报_封面_1080x1920.jpg")
+
+    def test_result_poster_keeps_crests_clear_of_score_panel_and_team_names(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw, figure = root / "raw.png", root / "figure.png"
+            home_crest, away_crest = root / "home.png", root / "away.png"
+            Image.new("RGB", (1024, 1280), (20, 40, 80)).save(raw)
+            Image.new("RGBA", (140, 90), (250, 205, 70, 255)).save(figure)
+            Image.new("RGBA", (120, 120), (210, 30, 45, 255)).save(home_crest)
+            Image.new("RGBA", (120, 120), (30, 80, 220, 255)).save(away_crest)
+            item = fixture().to_dict()
+            item.update({"home_crest": str(home_crest), "away_crest": str(away_crest)})
+            match = {
+                "result": {
+                    "home_team": "CORINTHIANS", "away_team": "SANTOS", "home_score": 2, "away_score": 1,
+                    "competition": "BRASILEIRÃO", "official_match_date": "2026-09-16", "result_status": "FT",
+                    "channels": [],
+                },
+                "fixture": item,
+                "research": {"verified_match_record": {}},
+            }
+            task = PosterTask("match", "single", "prompt", "poster.png", [match], "style")
+            output = root / "posters" / "poster.png"
+            meta = compose_single(raw, task, output, figure, root)
+            qa = validate_poster(output, task, meta)
+            self.assertTrue(meta["crest_layout_clear"])
+            self.assertTrue(qa["crests_deterministic"])
+            self.assertTrue(qa["passed"])
 
     def test_assembly_timing_preserves_full_inventory_durations(self) -> None:
         timing = _assembly_timing([3.0, 4.25], 5.55, 8.0)
