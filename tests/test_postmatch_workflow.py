@@ -334,7 +334,7 @@ Verified match-specific summary.
             state = json.loads((Path(temporary) / "text-model-prompt-state.json").read_text(encoding="utf-8"))
         self.assertEqual(model, "deterministic-local-fallback")
         self.assertEqual(catalog["model"], "deterministic-local-fallback")
-        self.assertEqual(len(catalog["posters"]), 5)
+        self.assertEqual(len(catalog["posters"]), len(records) + 1)
         self.assertTrue(all("4:5" in item["prompt"] and "readable text" in item["prompt"].lower() for item in catalog["posters"]))
         self.assertEqual(state["status"], "deterministic_fallback")
         self.assertEqual(call.call_count, 3)

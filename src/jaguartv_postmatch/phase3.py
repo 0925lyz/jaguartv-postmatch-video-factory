@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import re
@@ -153,6 +154,10 @@ CHANNEL_FILES = {
     "PREMIERE 3": "Premiere.png",
     "PREMIERE FC": "Premiere.png",
     "PREMIERE": "Premiere.png",
+    "PREMIERE 4": "Premiere.png",
+    "PREMIERE 5": "Premiere.png",
+    "RECORD": "Record.png",
+    "SBT": "SBT.png",
     "GE TV": "Ge_TV.png",
     "SPORTV": "SporTV.png",
     "PRIME VIDEO": "Prime_Video.png",
@@ -420,8 +425,11 @@ def _build_model_brief(
         "generation_scope": "Image2 creates the photographic background and verified participating real-player likenesses when supplied; use fictional hardman players only when no verified participant is available. No generated words, numbers, logos or crests.",
         "matches": matches,
         "summary_pages": [
-            {"id": "summary_01", "match_ids": [item["id"] for item in matches[:5]]},
-            {"id": "summary_02", "match_ids": [item["id"] for item in matches[5:]]},
+            {
+                "id": f"summary_{index:02d}",
+                "match_ids": [item["id"] for item in matches[offset : offset + 5]],
+            }
+            for index, offset in enumerate(range(0, len(matches), 5), start=1)
         ],
     }
 
@@ -606,9 +614,22 @@ def generate_prompts_with_text_model(
     output_path = phase3_dir / "text-model-prompt-catalog.json"
     fingerprint_path = phase3_dir / "prompt-catalog.sha256"
     _write_json(brief_path, brief)
-    _write_json(schema_path, PROMPT_SCHEMA)
 
-    expected_ids = [item["result"]["task1_fixture_id"] for item in records] + ["summary_01", "summary_02"]
+    # Summary grids are chunked five matches per page in _make_tasks(); derive the same
+    # count here so batches with more than ten fixtures do not crash on a missing ID.
+    summary_count = max(1, (len(records) + 4) // 5)
+    summary_ids = [f"summary_{index:02d}" for index in range(1, summary_count + 1)]
+    expected_ids = [item["result"]["task1_fixture_id"] for item in records] + summary_ids
+    # The output schema caps the prompt array; a batch larger than the cap would silently
+    # truncate the last IDs, so widen the cap to the exact expected count.
+    schema = copy.deepcopy(PROMPT_SCHEMA)
+    schema["properties"]["posters"]["maxItems"] = max(
+        PROMPT_SCHEMA["properties"]["posters"]["maxItems"], len(expected_ids)
+    )
+    schema["properties"]["posters"]["minItems"] = min(
+        PROMPT_SCHEMA["properties"]["posters"]["minItems"], len(expected_ids)
+    )
+    _write_json(schema_path, schema)
     fingerprint = hashlib.sha256(
         json.dumps(
             {"policy": PROMPT_POLICY_VERSION, "model": primary_model, "brief": brief},
@@ -646,7 +667,7 @@ Hard requirements for every prompt:
 - Map home to the left and away to the right without exception. Never depict the losing side as the winner. Whenever a decisive-result reaction is shown, the verified winner celebrates and the verified loser is disappointed. For a draw, use balanced restrained tension.
 - Do not invent a red card, injury, confrontation, foul, goal, trophy, scorer, celebration, or turning point that is absent from the supplied evidence.
 - Include explicit negative constraints and deterministic overlay safe zones.
-- summary_01 and summary_02 are results grids: no players; clean aligned row bands; left area reserved for kickoff time and channel icons; middle reserved for home crest/name, 'vs', away name/crest and final score; top center reserved for the pt-BR date; upper-right reserved for Figure 1.
+- {", ".join(summary_ids)} are results grids: no players; clean aligned row bands sized to their own match_ids list; left area reserved for kickoff time and channel icons; middle reserved for home crest/name, 'vs', away name/crest and final score; top center reserved for the pt-BR date; upper-right reserved for Figure 1. Give each results grid a different background and row treatment.
 - Exactly one single-match poster, selected deterministically as the fourth single-match ID, must use a controlled alternative editorial collage style. The other singles use varied premium broadcast styles.
 
 Validated fact brief follows. Do not alter any score, team, competition, date, status, or match mapping:
