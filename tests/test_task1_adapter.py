@@ -224,7 +224,8 @@ class Task1InputAdapterTests(unittest.TestCase):
                 },
             )
 
-            fixtures = load_task1_fixtures(image2_database, date(2026, 9, 2), prematch_root)
+            with patch("jaguartv_postmatch.task1._api_football_logos", return_value={}):
+                fixtures = load_task1_fixtures(image2_database, date(2026, 9, 2), prematch_root)
             self.assertEqual(len(fixtures), 1)
             self.assertEqual(fixtures[0].task1_fixture_id, "santos_palmeiras_260902")
             self.assertEqual(fixtures[0].kickoff_brt, "21:30")

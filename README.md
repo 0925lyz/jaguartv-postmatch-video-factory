@@ -49,6 +49,12 @@ CTA 口播只扫描 `assets/audio/voiceover` 中的本地 WAV，不调用 TTS；
 不再粗暴截断成长字母串。`captions.json` 同时标记发布时必须启用商业内容披露及适用的
 AI 生成内容标签。
 
+文本模型短暂不可用（例如 503）时，Phase 3 的 Image2 背景说明和 Phase 4 的背景动态说明会先以
+带退避和稳定抖动的三次尝试恢复；只有配置为不同的实际路由时才会调用备用路由。若所有允许路由
+均不可用，流程写入受规则校验的本地确定性背景说明并继续，绝不会把文字、比分、队徽、频道图标或
+Figure 1 交给模型重绘。每个运行目录会保存 `text-model-prompt-state.json` 及
+`motion-prompts/*_motion.model-state.json`，其中记录调用路由、失败原因、下次重试时间和最终来源。
+
 ## 使用
 
 ```bash

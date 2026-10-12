@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ FIXED_LOGO_POLICY = "use only the exact Figure 1 JaguarTV logo asset in the uppe
 CRS_BASE_URL = "https://crs.whynotm.abrdns.com"
 APIMART_BASE_URL = "https://api.apimart.ai/v1"
 PROMPT_POLICY_VERSION = "postmatch-evidence-concepts-v2"
+TEXT_MODEL_ATTEMPTS = 3
+TEXT_MODEL_RETRY_SECONDS = (8, 20)
 BATCH_STYLE_PROFILES = {
     "post1": (
         "Batch post1 / 赛后1: use cinematic stadium realism, deep floodlight perspective, bold asymmetrical "
@@ -496,6 +499,96 @@ def _load_validated_catalog(output_path: Path, expected_ids: list[str]) -> dict[
     return catalog
 
 
+def _model_route(model: str, provider: str | None) -> tuple[str, ...]:
+    """Compare the actual Codex CLI route rather than user-facing aliases."""
+    return tuple(codex_model_args(model, provider))
+
+
+def _is_permanent_text_model_failure(message: str) -> bool:
+    lowered = message.casefold()
+    return any(
+        marker in lowered
+        for marker in (
+            "unauthorized", "forbidden", "invalid api key", "invalid token", "unsupported model",
+            "model not found", "authentication", "http 400", "http 401", "http 403", "http 404",
+        )
+    )
+
+
+def _text_model_error(completed: subprocess.CompletedProcess[str] | None, error: Exception | None = None) -> str:
+    if error is not None:
+        return f"{type(error).__name__}: {str(error)[:500]}"
+    if completed is None:
+        return "text model did not return a process result"
+    detail = completed.stderr or completed.stdout or f"exit status {completed.returncode}"
+    return re.sub(r"(?:sk-|Bearer\\s+)[A-Za-z0-9._-]+", "[credential redacted]", detail[-700:]).strip()
+
+
+def _deterministic_prompt_catalog(
+    brief: dict[str, Any], expected_ids: list[str], batch_style: str,
+) -> dict[str, Any]:
+    """Keep Image2 production available when the optional prompt writer is unavailable.
+
+    All factual text, crests, scores, channel icons, and the Figure 1 mark remain
+    deterministic compositor inputs. This fallback only describes the clean visual base.
+    """
+    poster_by_id: dict[str, dict[str, Any]] = {}
+    for index, match in enumerate(brief["matches"], start=1):
+        direction = match["visual_direction"]
+        if direction["outcome"] == "decisive":
+            story = (
+                f"Show {direction['winner_team']} on the {direction['winner_side']} with authentic victory emotion, "
+                f"and {direction['loser_team']} on the {direction['loser_side']} with restrained disappointment. "
+                f"Use only the evidence-supported story concepts: {', '.join(match['allowed_poster_concepts'])}."
+            )
+        else:
+            story = (
+                f"Show balanced post-match tension between {match['home']} on the left and {match['away']} on the right, "
+                "with no winner celebration or invented decisive incident."
+            )
+        poster_by_id[match["id"]] = {
+            "id": match["id"],
+            "style": f"deterministic fallback visual base {index}",
+            "prompt": (
+                f"Create a 4:5 portrait premium football post-match photographic visual base for {match['home']} versus "
+                f"{match['away']}. The verified result is {match['score']} in {match['competition']}; it is factual context "
+                "only and must never be rendered as text or numbers. "
+                f"Apply this batch identity exactly: {batch_style} "
+                f"Composition variation {index}: use a distinct stadium depth, lighting direction, texture, and player scale. "
+                f"{story} Use verified current-season kits and the supplied identity mode {match['identity_mode']}; when no "
+                "verified participant likeness is supplied, use an anonymous fictional hardman footballer in the correct team colours. "
+                "Home remains left and away remains right. Keep every head, face, hairline, and eyes entirely above y=700/2560. "
+                "Reserve the upper-right for the exact Figure 1 JaguarTV logo that will be composited later. Reserve y=760..1185 "
+                "for the deterministic score panel, y=1255..1565 for deterministic official crests, and the lower region for "
+                "deterministic team labels. Generate no readable text, letters, numbers, score, date, clock, team name, crest, badge, "
+                "logo, channel mark, sponsor, watermark, UI, QR code, or fake shirt print. Do not cover a face with smoke, confetti, "
+                "light flare, geometry, or a generated mark. Do not invent a scorer, red card, injury, confrontation, foul, trophy, "
+                "or match incident. The clean background must be cinematic, detailed, and non-empty, while leaving all overlay safe "
+                "zones clean for the deterministic production compositor."
+            ),
+        }
+    for summary in brief["summary_pages"]:
+        poster_by_id[summary["id"]] = {
+            "id": summary["id"],
+            "style": "deterministic fallback results grid background",
+            "prompt": (
+                "Create a 4:5 portrait premium post-match results-grid visual base with no players. "
+                f"Apply this batch identity exactly: {batch_style} Use a distinct clean stadium-light and texture treatment for "
+                f"{summary['id']}. Leave aligned clear bands for the deterministic factual overlay: upper-center date, upper-right "
+                "exact Figure 1 JaguarTV logo, left-side kickoff and channel icons, middle home crest/name versus away name/crest, and "
+                "final-score zones. Generate no readable text, letters, numbers, score, date, clock, team name, crest, logo, sponsor, "
+                "watermark, UI, QR code, player, or fake badge. This is a 4:5 post-match visual base only; all factual Portuguese copy, "
+                "channel icons, official crests, logo, and scores are composited deterministically later. Keep the grid calm, premium, "
+                "high contrast, and non-empty without adding decorative elements to the reserved overlay bands. Never use a pre-match "
+                "or prediction visual treatment."
+            ),
+        }
+    return {
+        "model": "deterministic-local-fallback",
+        "posters": [poster_by_id[item_id] for item_id in expected_ids],
+    }
+
+
 def generate_prompts_with_text_model(
     records: list[dict[str, Any]], target_date: date, phase3_dir: Path,
     visual_overrides: dict[str, Any],
@@ -559,50 +652,101 @@ Hard requirements for every prompt:
 Validated fact brief follows. Do not alter any score, team, competition, date, status, or match mapping:
 {json.dumps(brief, ensure_ascii=False, indent=2)}
 """
-    command = [
-        "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(phase3_dir),
-        "-s", "read-only", *codex_model_args(primary_model, model_provider),
-        "--output-schema", str(schema_path),
-        "-o", str(output_path), instruction,
-    ]
-    completed = subprocess.run(command, text=True, capture_output=True, timeout=1800, check=False)
-    model = primary_model
-    if completed.returncode != 0 or not output_path.is_file():
-        fallback_command = [
-            "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(phase3_dir),
-            "-s", "read-only", *codex_model_args(fallback_model, model_provider),
-            "--output-schema", str(schema_path),
-            "-o", str(output_path), instruction,
-        ]
-        fallback = subprocess.run(fallback_command, text=True, capture_output=True, timeout=1800, check=False)
-        if fallback.returncode != 0 or not output_path.is_file():
-            sanitized = (
-                fallback.stderr or fallback.stdout or completed.stderr or completed.stdout
-                or "unknown prompt model adapter failure"
-            )[-1200:]
-            raise RuntimeError(f"Prompt generation failed: {sanitized}")
-        model = fallback_model
-    catalog = _parse_prompt_catalog(output_path.read_text(encoding="utf-8"))
-    # codex may duplicate entries; keep the first occurrence of each id.
-    seen: set[str] = set()
-    deduped = []
-    for item in catalog.get("posters", []):
-        iid = item.get("id")
-        if iid in seen:
-            continue
-        seen.add(iid)
-        deduped.append(item)
-    catalog["posters"] = deduped
-    actual_ids = [item["id"] for item in deduped]
-    if sorted(actual_ids) != sorted(expected_ids) or len(actual_ids) != len(set(actual_ids)):
-        raise RuntimeError(f"Prompt catalog ID mismatch: {actual_ids}")
-    for item in deduped:
-        lowered = item["prompt"].lower()
-        if len(item["prompt"]) < 700 or "4:5" not in item["prompt"] or "readable text" not in lowered:
-            raise RuntimeError(f"Primary model produced an incomplete Image2 prompt for {item['id']}")
-    catalog["model"] = model
+    state_path = phase3_dir / "text-model-prompt-state.json"
+    temporary = output_path.with_suffix(".model.json")
+    routes = [(primary_model, False)]
+    if _model_route(fallback_model, model_provider) != _model_route(primary_model, model_provider):
+        routes.append((fallback_model, True))
+    else:
+        print("[prompt-catalog] fallback route matches primary; skipping duplicate model invocation", flush=True)
+
+    total_attempt = 0
+    last_error = "text model did not produce a valid prompt catalog"
+    for selected_model, is_fallback in routes:
+        for attempt in range(1, TEXT_MODEL_ATTEMPTS + 1):
+            total_attempt += 1
+            temporary.unlink(missing_ok=True)
+            command = [
+                "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-C", str(phase3_dir),
+                "-s", "read-only", *codex_model_args(selected_model, model_provider),
+                "--output-schema", str(schema_path),
+                "-o", str(temporary), instruction,
+            ]
+            completed: subprocess.CompletedProcess[str] | None = None
+            execution_error: Exception | None = None
+            try:
+                completed = subprocess.run(command, text=True, capture_output=True, timeout=1800, check=False)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                execution_error = error
+            catalog = _load_validated_catalog(temporary, expected_ids) if completed and completed.returncode == 0 else None
+            if catalog is not None:
+                catalog["model"] = selected_model
+                _write_json(output_path, catalog)
+                _write_json(state_path, {
+                    "operation": "postmatch-image2-prompt-catalog",
+                    "status": "succeeded",
+                    "attempt": total_attempt,
+                    "model": selected_model,
+                    "fallback_route_used": is_fallback,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                fingerprint_path.write_text(fingerprint + "\n", encoding="utf-8")
+                return catalog, selected_model
+
+            last_error = _text_model_error(completed, execution_error)
+            permanent = _is_permanent_text_model_failure(last_error)
+            if permanent or attempt == TEXT_MODEL_ATTEMPTS:
+                _write_json(state_path, {
+                    "operation": "postmatch-image2-prompt-catalog",
+                    "status": "route_failed",
+                    "attempt": total_attempt,
+                    "model": selected_model,
+                    "fallback_route_used": is_fallback,
+                    "permanent": permanent,
+                    "error": last_error,
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                print(
+                    f"[prompt-catalog] model={selected_model} attempt={attempt}/{TEXT_MODEL_ATTEMPTS} "
+                    f"failed permanent={permanent}; trying next allowed route",
+                    flush=True,
+                )
+                break
+            base_delay = TEXT_MODEL_RETRY_SECONDS[min(attempt - 1, len(TEXT_MODEL_RETRY_SECONDS) - 1)]
+            jitter = int(hashlib.sha256(f"{batch_id}:{selected_model}:{attempt}".encode()).hexdigest()[:2], 16) % 4
+            delay = base_delay + jitter
+            next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+            _write_json(state_path, {
+                "operation": "postmatch-image2-prompt-catalog",
+                "status": "retry_wait",
+                "attempt": total_attempt,
+                "model": selected_model,
+                "fallback_route_used": is_fallback,
+                "error": last_error,
+                "delay_seconds": delay,
+                "next_retry_at": next_retry_at,
+            })
+            print(
+                f"[prompt-catalog] model={selected_model} attempt={attempt}/{TEXT_MODEL_ATTEMPTS} "
+                f"failed; next_retry_at={next_retry_at}",
+                flush=True,
+            )
+            time.sleep(delay)
+
+    catalog = _deterministic_prompt_catalog(brief, expected_ids, batch_style)
+    _write_json(output_path, catalog)
+    _write_json(state_path, {
+        "operation": "postmatch-image2-prompt-catalog",
+        "status": "deterministic_fallback",
+        "attempt": total_attempt,
+        "model": "deterministic-local-fallback",
+        "fallback_route_used": True,
+        "error": last_error,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    print("[prompt-catalog] text model unavailable; using validated deterministic prompt catalog", flush=True)
     fingerprint_path.write_text(fingerprint + "\n", encoding="utf-8")
-    return catalog, model
+    return catalog, "deterministic-local-fallback"
 
 
 def _single_filename(result: dict[str, Any], target_date: date) -> str:
@@ -1236,9 +1380,16 @@ def validate_poster(path: Path, task: PosterTask, compose_meta: dict[str, Any]) 
         nonblank = max(ImageStat.Stat(image.convert("RGB").resize((32, 40))).var) > 25
     background_path = Path(str(compose_meta.get("background_path") or ""))
     foreground_path = Path(str(compose_meta.get("foreground_path") or ""))
-    background_size = Image.open(background_path).size if background_path.is_file() else None
-    foreground_size = Image.open(foreground_path).size if foreground_path.is_file() else None
-    foreground_alpha = Image.open(foreground_path).convert("RGBA").getchannel("A").getbbox() if foreground_path.is_file() else None
+    background_size = None
+    foreground_size = None
+    foreground_alpha = None
+    if background_path.is_file():
+        with Image.open(background_path) as background:
+            background_size = background.size
+    if foreground_path.is_file():
+        with Image.open(foreground_path) as foreground:
+            foreground_size = foreground.size
+            foreground_alpha = foreground.convert("RGBA").getchannel("A").getbbox()
     icon_boxes = [item.get("box") for item in compose_meta.get("channel_icons") or []]
     crest_boxes = [box for box in compose_meta.get("crest_boxes") or [] if isinstance(box, list) and len(box) == 4]
     expected_crests = 2 if task.kind == "single" else len(task.matches) * 2

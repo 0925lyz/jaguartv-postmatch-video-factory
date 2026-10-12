@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,8 @@ DOWNLOAD_SENTENCE = "Acesse jaguartvbrasil.com/baixar-app para baixar."
 TIKTOK_CAPTION_LIMIT = 300
 TIKTOK_TITLE_LIMIT = 90
 REQUIRED_HASHTAGS = ("#jaguartv", "#iptv")
+TEXT_MODEL_ATTEMPTS = 3
+TEXT_MODEL_RETRY_SECONDS = (8, 20)
 SINGLE_HOOK_ACTION_POLICY = (
     "animate the poster background with stadium light, smoke, crowd depth, fabric motion, and score energy; "
     "the winning player may jump, shout, pump fists, and celebrate intensely; "
@@ -219,6 +221,47 @@ def _motion_context(entry: dict[str, Any], research: dict[str, Any]) -> str:
     )
 
 
+def _motion_payload_is_valid(payload: dict[str, Any]) -> bool:
+    prompt = str(payload.get("motion_prompt", ""))
+    duration_terms = ("4 seconds", "4-second", "four seconds", "four-second")
+    return (
+        len(prompt) >= 260
+        and "9:16" in prompt
+        and any(term in prompt.lower() for term in duration_terms)
+        and isinstance(payload.get("shot_script"), list)
+        and len(payload["shot_script"]) >= 3
+        and bool(str(payload.get("safety", "")).strip())
+    )
+
+
+def _deterministic_motion_payload(task_id: str, kind: str, context: str) -> dict[str, Any]:
+    """A compliant background-only motion instruction when the text service is offline."""
+    action = (
+        "Hold a locked camera while subtle stadium light, crowd depth, distant fabric movement, and gentle atmospheric parallax move only in the clean background."
+        if kind == "summary"
+        else
+        "Hold a locked camera while subtle stadium light, smoke depth, crowd movement, fabric motion, and restrained emotional energy move only in the clean photographic background."
+    )
+    return {
+        "motion_prompt": (
+            "Create a 9:16 vertical, exactly 4 seconds, background-only image-to-video shot from the supplied clean poster background. "
+            f"Task {task_id} is {kind} post-match content. {action} The camera is completely locked: no zoom, push-in, pan, tilt, "
+            "reframing, shake, edge movement, or perspective change. Preserve every supplied player identity, anatomy, kit colour, "
+            "facial position, and first-frame composition. Generate no text, letters, numbers, score, date, crest, badge, channel mark, "
+            "sponsor, watermark, UI, logo, branding, QR code, new person, limb, trophy, red card, foul, injury, goal reenactment, or "
+            "invented incident. The upper-right Figure 1 JaguarTV logo and all factual overlays are absent here and will be composited "
+            "as an exact locked foreground after background motion. Keep all face-safe and overlay-safe areas stable. Verified context is "
+            f"reference only: {context}"
+        ),
+        "shot_script": [
+            {"time": "0.0-1.3s", "action": "Locked first frame; introduce only subtle background light and depth movement."},
+            {"time": "1.3-2.8s", "action": "Maintain the composition while restrained ambient background motion continues."},
+            {"time": "2.8-4.0s", "action": "Settle back to a stable background with no foreground, typography, or brand changes."},
+        ],
+        "safety": "Background-only motion; deterministic foreground overlays are composited after generation.",
+    }
+
+
 def _run_motion_model(
     master: Path, task_id: str, kind: str, context: str, output: Path, schema_path: Path,
     primary_model: str = DEFAULT_REASONING_MODEL, fallback_model: str = DEFAULT_REASONING_FALLBACK,
@@ -226,8 +269,13 @@ def _run_motion_model(
     model_provider: str | None = None,
 ) -> tuple[dict[str, Any], str, bool]:
     if output.is_file():
-        payload = json.loads(output.read_text(encoding="utf-8"))
-        return payload, str(payload.get("model_adapter", primary_model)), bool(payload.get("fallback_used", False))
+        try:
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if _motion_payload_is_valid(payload):
+            return payload, str(payload.get("model_adapter", primary_model)), bool(payload.get("fallback_used", False))
+        print(f"[motion] {task_id} cached prompt is invalid; regenerating", flush=True)
     camera_rule = (
         "Use a completely locked camera: no zoom, no push-in, no pan, no tilt, no reframing, and no edge movement. "
         "Animate only atmospheric light and tiny depth parallax in the supplied clean background."
@@ -262,38 +310,115 @@ Requirements:
             text=True, capture_output=True, timeout=900, check=False,
         )
 
-    def invoke_with_retry(model: str, target: Path, attempts: int = 3) -> subprocess.CompletedProcess[str] | None:
-        last: subprocess.CompletedProcess[str] | None = None
-        for attempt in range(1, attempts + 1):
-            target.unlink(missing_ok=True)
-            last = invoke(model, target)
-            if last.returncode == 0 and target.is_file() and target.read_text(encoding="utf-8", errors="replace").strip():
-                return last
+    state_path = output.with_suffix(".model-state.json")
+    temporary = output.with_suffix(".model.json")
+    routes = [(primary_model, False)]
+    if tuple(codex_model_args(fallback_model, model_provider)) != tuple(codex_model_args(primary_model, model_provider)):
+        routes.append((fallback_model, True))
+    else:
+        print(f"[motion] {task_id} fallback route matches primary; skipping duplicate model invocation", flush=True)
+
+    payload: dict[str, Any] | None = None
+    model = primary_model
+    fallback = False
+    total_attempt = 0
+    last_error = "text model did not produce a valid motion prompt"
+    for selected_model, route_fallback in routes:
+        for attempt in range(1, TEXT_MODEL_ATTEMPTS + 1):
+            total_attempt += 1
+            temporary.unlink(missing_ok=True)
+            completed: subprocess.CompletedProcess[str] | None = None
+            execution_error: Exception | None = None
+            try:
+                completed = invoke(selected_model, temporary)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                execution_error = error
+            candidate: dict[str, Any] = {}
+            if completed and completed.returncode == 0 and temporary.is_file():
+                try:
+                    candidate = json.loads(temporary.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    candidate = {}
+            if _motion_payload_is_valid(candidate):
+                payload, model, fallback = candidate, selected_model, route_fallback
+                _write_json(state_path, {
+                    "operation": "postmatch-background-motion-prompt",
+                    "task_id": task_id,
+                    "status": "succeeded",
+                    "attempt": total_attempt,
+                    "model": selected_model,
+                    "fallback_route_used": route_fallback,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                break
+
+            detail = (
+                f"{type(execution_error).__name__}: {str(execution_error)[:500]}"
+                if execution_error else
+                ((completed.stderr if completed else "") or (completed.stdout if completed else "") or "invalid model JSON")[-700:]
+            )
+            last_error = re.sub(r"(?:sk-|Bearer\\s+)[A-Za-z0-9._-]+", "[credential redacted]", detail).strip()
+            permanent = any(marker in last_error.casefold() for marker in (
+                "unauthorized", "forbidden", "invalid api key", "invalid token", "unsupported model",
+                "model not found", "authentication", "http 400", "http 401", "http 403", "http 404",
+            ))
+            if permanent or attempt == TEXT_MODEL_ATTEMPTS:
+                _write_json(state_path, {
+                    "operation": "postmatch-background-motion-prompt",
+                    "task_id": task_id,
+                    "status": "route_failed",
+                    "attempt": total_attempt,
+                    "model": selected_model,
+                    "fallback_route_used": route_fallback,
+                    "permanent": permanent,
+                    "error": last_error,
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                print(
+                    f"[motion] {task_id} model={selected_model} attempt={attempt}/{TEXT_MODEL_ATTEMPTS} "
+                    f"failed permanent={permanent}; trying next allowed route",
+                    flush=True,
+                )
+                break
+            base_delay = TEXT_MODEL_RETRY_SECONDS[min(attempt - 1, len(TEXT_MODEL_RETRY_SECONDS) - 1)]
+            jitter = (sum(task_id.encode("utf-8")) + attempt) % 4
+            delay = base_delay + jitter
+            next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+            _write_json(state_path, {
+                "operation": "postmatch-background-motion-prompt",
+                "task_id": task_id,
+                "status": "retry_wait",
+                "attempt": total_attempt,
+                "model": selected_model,
+                "fallback_route_used": route_fallback,
+                "error": last_error,
+                "delay_seconds": delay,
+                "next_retry_at": next_retry_at,
+            })
             print(
-                f"[motion] {task_id} {model} attempt {attempt}/{attempts} failed "
-                f"(rc={last.returncode}, has_file={target.is_file()}); retrying",
+                f"[motion] {task_id} model={selected_model} attempt={attempt}/{TEXT_MODEL_ATTEMPTS} "
+                f"failed; next_retry_at={next_retry_at}",
                 flush=True,
             )
-        return last
+            time.sleep(delay)
+        if payload is not None:
+            break
 
-    temporary = output.with_suffix(".model.json")
-    result = invoke_with_retry(primary_model, temporary, attempts=3)
-    model, fallback = primary_model, False
-    if result is None or result.returncode != 0 or not temporary.is_file():
-        result = invoke_with_retry(fallback_model, temporary, attempts=3)
-        if result is None or result.returncode != 0 or not temporary.is_file():
-            error = (
-                (result.stderr if result else "") or (result.stdout if result else "")
-                or "model adapter failure"
-            )[-900:]
-            raise RuntimeError(f"Motion prompt generation failed for {task_id}: {error}")
-        model, fallback = fallback_model, True
-    payload = json.loads(temporary.read_text(encoding="utf-8"))
     temporary.unlink(missing_ok=True)
-    prompt = str(payload.get("motion_prompt", ""))
-    duration_terms = ("4 seconds", "4-second", "four seconds", "four-second")
-    if len(prompt) < 260 or not any(term in prompt.lower() for term in duration_terms) or "9:16" not in prompt:
-        raise RuntimeError(f"Motion prompt validation failed for {task_id}")
+    if payload is None:
+        payload = _deterministic_motion_payload(task_id, kind, context)
+        model, fallback = "deterministic-local-fallback", True
+        _write_json(state_path, {
+            "operation": "postmatch-background-motion-prompt",
+            "task_id": task_id,
+            "status": "deterministic_fallback",
+            "attempt": total_attempt,
+            "model": model,
+            "fallback_route_used": True,
+            "error": last_error,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        print(f"[motion] {task_id} text model unavailable; using deterministic background-only prompt", flush=True)
     payload["task_id"] = task_id
     payload["model_adapter"] = model
     payload["reasoning_effort"] = reasoning_effort

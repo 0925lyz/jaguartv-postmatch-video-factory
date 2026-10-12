@@ -25,6 +25,7 @@ from jaguartv_postmatch.phase3 import (
     PosterTask,
     _build_model_brief,
     compose_single,
+    generate_prompts_with_text_model,
     generate_image2,
     match_visual_direction,
     validate_poster,
@@ -37,6 +38,7 @@ from jaguartv_postmatch.phase4 import (
     _caption_tags,
     _generate_apimart_video,
     _motion_context,
+    _run_motion_model,
     video_filenames,
 )
 from jaguartv_postmatch.phase5 import _artifact_revision, _validate_cross_batch_uniqueness
@@ -309,6 +311,52 @@ Verified match-specific summary.
         self.assertIn("verified-goalscorer-celebration", match["allowed_poster_concepts"])
         self.assertIn("verified-red-card-scene", match["allowed_poster_concepts"])
         self.assertNotIn("Unverified social claim.", match["verified_research_summaries"])
+
+    def test_text_model_outage_uses_validated_deterministic_prompt_catalog(self) -> None:
+        records = []
+        for index in range(3):
+            records.append({
+                "result": {
+                    "task1_fixture_id": f"fixture-{index}",
+                    "home_team": f"HOME {index}", "away_team": f"AWAY {index}",
+                    "home_score": 2, "away_score": 1, "competition": "BRASILEIRAO",
+                    "official_match_date": "2026-10-12", "result_status": "FT", "channels": ["GLOBO"],
+                },
+                "research": {"verified_match_record": {"participants": [], "goals": [], "incidents": {}}},
+            })
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "jaguartv_postmatch.phase3.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 1, "", "HTTP 503 Service Unavailable"),
+        ) as call, patch("jaguartv_postmatch.phase3.time.sleep"):
+            catalog, model = generate_prompts_with_text_model(
+                records, date(2026, 10, 12), Path(temporary), {}, "current-task", "current-task", batch_id="post1",
+            )
+            state = json.loads((Path(temporary) / "text-model-prompt-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(model, "deterministic-local-fallback")
+        self.assertEqual(catalog["model"], "deterministic-local-fallback")
+        self.assertEqual(len(catalog["posters"]), 5)
+        self.assertTrue(all("4:5" in item["prompt"] and "readable text" in item["prompt"].lower() for item in catalog["posters"]))
+        self.assertEqual(state["status"], "deterministic_fallback")
+        self.assertEqual(call.call_count, 3)
+
+    def test_motion_prompt_outage_uses_deterministic_background_only_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "jaguartv_postmatch.phase4.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 1, "", "HTTP 503 Service Unavailable"),
+        ) as call, patch("jaguartv_postmatch.phase4.time.sleep"):
+            root = Path(temporary)
+            motion, model, fallback = _run_motion_model(
+                root / "background.png", "fixture-1", "single", "verified final result",
+                root / "motion.json", root / "motion.schema.json", "current-task", "current-task",
+            )
+            state = json.loads((root / "motion.model-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(model, "deterministic-local-fallback")
+        self.assertTrue(fallback)
+        self.assertIn("background-only", motion["motion_prompt"])
+        self.assertIn("9:16", motion["motion_prompt"])
+        self.assertEqual(len(motion["shot_script"]), 3)
+        self.assertEqual(state["status"], "deterministic_fallback")
+        self.assertEqual(call.call_count, 3)
 
     def test_image2_uses_active_api_before_apimart(self) -> None:
         task = PosterTask("match", "single", "prompt", "poster.png", [], "style")
